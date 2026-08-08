@@ -726,3 +726,24 @@ git add docs/superpowers/specs/2026-08-07-bot-speed-control-design.md
 - **`ThinkingOverlay` is in `SpireBot.SpireBotCode.Overlay`** and references `BotController` unqualified — the parent namespace is in scope, so `BotControlBar` can do the same.
 - **Line numbers in this plan are from the pre-change files.** They will drift as you apply edits; anchor on the quoted code, not the numbers.
 - If a step's "expected" output does not match what you see, stop and report rather than adapting the plan — a surprise here usually means an assumption in the spec was wrong.
+
+---
+
+## Post-execution amendment (2026-08-07)
+
+**Task 2, step 3 as written above is superseded.** The final whole-branch review found its premise
+false: `StuckRecovery.Tick()` is already self-guarding (`StuckRecovery.cs:68-72` — on a healthy idle
+board `Blocked()` is false, so it zeroes its counter and returns), so gating it behind `IsGated()`
+bought nothing in the healthy case while suppressing recovery of a genuinely wedged command for the
+whole pause.
+
+Shipped behaviour instead: `StuckRecovery.Tick()` runs **unconditionally** in `OnHeartbeat`, and
+only its force-clear *log line* is suppressed while `BotController.Paused` (the force-clear itself
+still happens). See commit `89fb272` and the updated spec's Component 1, requirement 1.
+
+The unconditional `ScheduleHeartbeat()` re-arm in the same method is unaffected — that one is
+genuinely load-bearing.
+
+Task 2, step 2's claim that the guard *ordering* in `OnInputRequired` is load-bearing was also
+imprecise: neither guard mutates `_stepOnce`, so their relative order is irrelevant. The real
+invariant is that `_stepOnce = false` sits below both. Corrected in commit `89fb272`.

@@ -1,7 +1,7 @@
 # Live speed / pause / step control for SpireBot
 
 **Date:** 2026-08-07
-**Status:** approved, not yet implemented
+**Status:** implemented 2026-08-07 on branch `bot-speed-control`; in-game acceptance pending
 
 Adds an in-game control bar to SpireBot's overlay so a bot run's speed can be changed, paused,
 and single-stepped while it plays — mirroring the control bar the RunReplays mod already has
@@ -106,37 +106,48 @@ The gate sits in the heartbeat/input path:
 private static void OnHeartbeat()
 {
     if (!_running) return;
-    if (!IsGated())          // i.e. not (paused and not stepping)
-        StuckRecovery.Tick();
+    StuckRecovery.Tick();    // self-guarding; see requirement 1 below
     OnInputRequired();
     ScheduleHeartbeat();     // re-arm ALWAYS
 }
 ```
 
-`OnInputRequired` returns early when gated. Ordering inside it is load-bearing:
+`OnInputRequired` returns early when gated:
 
 ```csharp
 private static void OnInputRequired()
 {
     if (!_running) return;
-    if (IsGated()) return;                         // gate BEFORE the pending check
-    if (ReplayEngine.HasPendingCommand) return;    // not a new decision; step NOT consumed
+    if (IsGated()) return;
+    if (ReplayEngine.HasPendingCommand) return;    // not a new decision
     _stepOnce = false;                             // consume only once a decision will really run
     RunDecision();
 }
 ```
 
 `_stepOnce` must be cleared only on the path that actually reaches `RunDecision()`. Consuming it
-before the `HasPendingCommand` early-return would silently swallow the step whenever the click
-landed while a command was still in flight, and the user would see a dead Step button.
+above either guard would silently swallow the step whenever the click landed while a command was
+still in flight, and the user would see a dead Step button. (The *relative* order of the two guards
+does not matter — neither mutates `_stepOnce`. The invariant is that the consume sits below both.)
 
 Three correctness requirements this satisfies:
 
-1. **`StuckRecovery.Tick()` must not run while paused.** It currently runs before
-   `OnInputRequired` (`BotController.cs:399-405`); left ungated, a 30-second pause looks like a
-   stalled run and triggers recovery mid-inspection.
+1. **`StuckRecovery.Tick()` runs unconditionally, including while paused.** An earlier draft of
+   this design gated it, reasoning that a long pause would look like a stall and fire recovery
+   mid-inspection. **That premise was false** and the final whole-branch review caught it:
+   `Tick()` is already self-guarding — on a healthy idle board no in-flight flag is set, so
+   `Blocked()` is false and it zeroes its counter and returns (`StuckRecovery.cs:68-72`). Gating
+   therefore bought nothing in the healthy case, while in the one case that matters — a command
+   that genuinely wedged — it suppressed recovery for the *entire* pause, leaving the run stuck
+   and indistinguishable from healthy in the log.
+
+   The residual cost of ungating is that pausing *mid-animation* leaves a blocker set with nothing
+   dispatchable, so after ~5 heartbeats `StuckRecovery` force-clears and would log a
+   completion-path bug that isn't one. So the **log line only** is suppressed while
+   `BotController.Paused` — the force-clear itself still happens.
 2. **The heartbeat must re-arm even while paused**, or unpausing would never resume — the
    `InputRequired` signal is edge-triggered and the heartbeat is the only level-triggered backstop.
+   This one *is* load-bearing.
 3. **One gate is sufficient.** `OnInputRequired` is the sole call site of `RunDecision`
    (`BotController.cs:375`), verified by search.
 
@@ -258,8 +269,11 @@ Then build + in-game:
 3. In-game (launch via Steam, not the exe directly):
    - Start a Bot Run; the control bar appears in the overlay.
    - Step speed both directions; animation rate visibly tracks the label.
-   - Pause; decisions stop, the game stays interactive, no `STALL`/recovery lines accumulate
-     during a long (30s+) pause.
+   - Pause; decisions stop and the game stays interactive.
+   - Pause *immediately after a decision dispatches* (not just while idle) and wait 30s+. The
+     force-clear may fire, but it must stay silent while paused — a `StuckRecovery: nothing
+     dispatchable ...` line appearing during a pause means requirement 1's log suppression is
+     wrong. On resume the run must continue normally rather than dumping a recovery burst.
    - Step once; exactly one decision fires and the bot re-pauses.
    - Resume; the previously selected multiplier is restored (not 1.0).
    - Stop the run; `Engine.TimeScale` returns to 1.0.
