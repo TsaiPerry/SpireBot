@@ -46,9 +46,27 @@ boundary therefore suppresses the side effects for free.
 | 721 | `HandleUnsupported` — Crystal Sphere random valid click |
 | 730 | `HandleUnsupported` — first available command |
 
-All six route through a new private `BotController.Dispatch(cmd, kind)` instead. `Dispatch` either
+All six route through a new private `BotController.Dispatch(...)` instead. `Dispatch` either
 executes (normal) or caches (previewing). `ActionExecutor` itself is unchanged — it stays a dumb
 utility, and a reader at any call site can see that the hold exists.
+
+**One selection-time side effect sits *upstream* of the choke point and needs its own treatment:**
+the card-claim branch of `TryAutoAdvance` calls `RewardClaimMemory.TryBeginAutoAdvance(claim)` as
+its *condition* (`BotController.cs:560`), and that call mutates state before anything executes —
+it increments the loop-backstop counter (`MaxAutoAdvancesBeforeForcedDecline = 3`) and records the
+open reward index. Previewing that branch naively would burn claim attempts the bot never made:
+three aborted previews (pause → preview → unpause, repeated) would force-decline a card reward.
+
+Fix: `RewardClaimMemory` gains a **read-only probe** `CanAutoAdvance(claim)` (the same count
+comparison, no mutation). While previewing, the branch selects using the probe; the real
+`TryBeginAutoAdvance` is deferred to commit time via a `CommitGate` on the held action (Component
+2). The probe and the deferred call provably agree: the counter only mutates on commits and on
+unpaused dispatches, neither of which can interleave between a preview and its own commit. The
+gate's return is still honored defensively — if it ever refuses, the commit is discarded and
+logged instead of executing, which matches the unpaused forced-decline path (which also does not
+execute the claim). All five other sites have pure selection (verified: shop-exit checks and
+policy inference read state; `StallDiagnostics.ReportIfChanged` and the log-once latches are
+diagnostics only) and pass no gate.
 
 ## Design
 
@@ -158,8 +176,9 @@ decision they see is one the bot acted on:
 ```csharp
 private sealed record PendingAction(
     ReplayCommand Cmd, DecisionKind Kind,
-    DecisionContext Ctx, ActionMap Map, ObsResult? Obs, PolicyResult? Result,
-    string Key);   // BuildDecisionKey(Ctx) at the time it was computed — see Component 1a
+    DecisionContext Ctx, ActionMap? Map, ObsResult? Obs, PolicyResult? Result,
+    string Key,               // BuildDecisionKey(Ctx) at compute time — see Component 1a
+    Func<bool>? CommitGate);  // deferred selection side effect (card-claim TryBeginAutoAdvance)
 
 private static PendingAction? _pending;
 public static bool HasPendingPreview => _pending != null;
@@ -167,7 +186,9 @@ public static string? PendingPreviewDescription => _pending?.Cmd.Describe();
 ```
 
 `Result` is nullable because the auto-advance and `HandleUnsupported` paths select a command
-without a `PolicyResult`.
+without a `PolicyResult`. `Map` is nullable because `TryAutoAdvance(ctx)` has no `ActionMap` in
+scope; the deferred dump requires `Result` (and therefore `Map`/`Obs`) to be non-null, which the
+normal dispatch path always supplies.
 
 Two distinct entry points, so neither has to branch on how it was reached:
 
@@ -175,9 +196,11 @@ Two distinct entry points, so neither has to branch on how it was reached:
   overwrite `_pending` and return. Otherwise call `ActionExecutor.Execute(cmd, kind)` directly:
   this is today's path, where `AdvanceStuckGuard` and `DecisionDumper.Write` have already run
   inline in `RunDecision`.
-- **`Commit(PendingAction held)`** — called only from `StepOnce`. Writes the deferred dump (when
-  `held.Result` is non-null), then `ActionExecutor.Execute(held.Cmd, held.Kind)`. It does **not**
-  run `AdvanceStuckGuard`, for the reason given above.
+- **`Commit(PendingAction held)`** — called only from `StepOnce`. Runs `held.CommitGate` first
+  (discarding the commit with a log line if it refuses — defensive; see "Where the hold goes"),
+  then writes the deferred dump (when `held.Result` is non-null), then
+  `ActionExecutor.Execute(held.Cmd, held.Kind)`. It does **not** run `AdvanceStuckGuard`, for the
+  reason given above.
 
 The cache is refreshed only when `BuildDecisionKey` changes (Component 1a), so a held action
 persists across an idle pause instead of being recomputed each second. It is cleared on unpause, on
