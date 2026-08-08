@@ -1,0 +1,8 @@
+<Project>
+    <!--
+      Machine-specific overrides go in local.props (gitignored), not here.
+      This file exists so SpireBot.csproj's `Exists('Directory.Build.props')` None-include
+      always resolves, matching the ModTemplate-StS2 scaffold; it has no properties of its own
+      today since Sts2PathDiscovery.props + local.props already cover path discovery.
+    -->
+</Project>

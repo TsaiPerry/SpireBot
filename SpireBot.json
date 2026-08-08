@@ -1,0 +1,13 @@
+{
+  "id": "SpireBot",
+  "name": "SpireBot",
+  "author": "Perry",
+  "description": "Plays Slay the Spire 2 runs via an ONNX policy.",
+  "version": "v0.0.1",
+  "has_pck": false,
+  "has_dll": true,
+  "dependencies": [
+    {"id": "BaseLib", "min_version": "3.3.0"}
+  ],
+  "affects_gameplay": true
+}

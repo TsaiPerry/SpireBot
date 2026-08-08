@@ -1,0 +1,22 @@
+<Project>
+    <!--
+      Copy this file to local.props (gitignored) and adjust paths for your machine.
+
+      If you omit local.props entirely, Sts2PathDiscovery.props will try:
+      - Windows: Steam uninstall registry (App 2868840), then %SteamPath%\steamapps, then Program Files (x86)\Steam\steamapps
+      - Linux:  ~/.local/share/Steam/steamapps
+      - macOS:  ~/Library/Application Support/Steam/steamapps
+
+      Godot / MegaDot is not auto-detected; set GodotPath to export a .pck, or leave unset (this mod ships no .pck).
+    -->
+    <PropertyGroup>
+        <Sts2Path>Path\To\SteamLibrary\steamapps\common\Slay the Spire 2</Sts2Path>
+        <!-- Optional: override managed data folder (default is OS-specific under Sts2Path) -->
+        <!-- <Sts2DataDir>$(Sts2Path)\data_sts2_windows_x86_64</Sts2DataDir> -->
+        <!-- Optional: BaseLib.dll location if installed via Steam Workshop instead of the mods folder
+             (default is $(ModsPath)BaseLib\BaseLib.dll) -->
+        <!-- <BaseLibDllPath>Path\To\SteamLibrary\steamapps\workshop\content\2868840\3737335127\BaseLib\BaseLib.dll</BaseLibDllPath> -->
+        <!-- Optional: MegaDot / Godot 4.5.1 mono executable, only needed if exporting a .pck -->
+        <!-- <GodotPath>Z:\Projects\sts2\megadot\MegaDot_v4.5.1-stable_mono_win64.exe</GodotPath> -->
+    </PropertyGroup>
+</Project>

@@ -1,0 +1,109 @@
+<Project Sdk="Godot.NET.Sdk/4.5.1" InitialTargets="CheckDependencyPaths">
+    <Import Project=".\local.props" Condition="Exists('.\local.props')"/>
+    <Import Project=".\Sts2PathDiscovery.props"/>
+
+    <PropertyGroup>
+        <TargetFramework>net9.0</TargetFramework>
+        <ImplicitUsings>true</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+        <AppOutputBase>$(MSBuildProjectDirectory)\</AppOutputBase>
+        <PathMap>$(AppOutputBase)=.\</PathMap>
+        <GodotDisabledSourceGenerators>GodotPluginsInitializer</GodotDisabledSourceGenerators>
+
+        <!-- Needed so `dotnet build` resolves + copies the ONNX Runtime's win-x64 native asset
+             (onnxruntime.dll) to the output directory; without a RID, NuGet has no platform to
+             pick a runtimes/<rid>/native asset for, and the mod would crash at load. This is a
+             library, not a publishable app, so SelfContained stays false. -->
+        <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+        <SelfContained>false</SelfContained>
+
+        <!-- Class-library projects default this to false (only the final app is expected to copy its
+             dependencies locally); Godot itself relies on that default, resolving its own managed
+             dependencies from the NuGet cache via deps.json at launch. Our mod loader has no such
+             resolution and loads SpireBot.dll standalone, so anything it needs (namely the ONNX Runtime's
+             managed wrapper) must physically ship next to it. This also pulls in GodotSharp.dll /
+             GodotSharpEditor.dll, which we deliberately do NOT forward to the mods folder below — the
+             game already has those loaded in-process, and shipping a second copy risks a type-identity
+             mismatch. -->
+        <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    </PropertyGroup>
+
+    <PropertyGroup>
+        <!-- Disable architecture mismatch warning; mods are ideally built for all platforms (MSIL)
+             while your local StS2 version will be for your specific platform. -->
+        <NoWarn>$(NoWarn);MSB3270</NoWarn>
+    </PropertyGroup>
+
+    <ItemGroup Condition="Exists('$(Sts2DataDir)')">
+        <Reference Include="0Harmony">
+            <HintPath>$(Sts2DataDir)/0Harmony.dll</HintPath>
+            <Private>false</Private>
+        </Reference>
+        <Reference Include="sts2">
+            <HintPath>$(Sts2DataDir)/sts2.dll</HintPath>
+            <Private>false</Private>
+        </Reference>
+    </ItemGroup>
+
+    <PropertyGroup>
+        <!-- BaseLib may be installed via Steam Workshop rather than the mods folder;
+             override BaseLibDllPath in local.props to point at the Workshop copy. -->
+        <BaseLibDllPath Condition="'$(BaseLibDllPath)' == ''">$(ModsPath)BaseLib/BaseLib.dll</BaseLibDllPath>
+    </PropertyGroup>
+
+    <ItemGroup Condition="Exists('$(ModsPath)')">
+        <Reference Include="BaseLib">
+            <HintPath>$(BaseLibDllPath)</HintPath>
+            <Private>false</Private>
+        </Reference>
+    </ItemGroup>
+
+    <ItemGroup>
+        <!-- Publicizes originally private/protected sts2 members for our HarmonyLib patches / obs builder. -->
+        <Publicize Include="sts2" IncludeVirtualMembers="false" IncludeCompilerGeneratedMembers="false" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Krafs.Publicizer" Version="2.3.0" PrivateAssets="All"/>
+        <!-- Not provided by the game or by another mod, so these stay copy-local (the PackageReference
+             default) unlike the References above, which are all Private=false. Microsoft.ML.OnnxRuntime
+             is native-binaries-only (its native onnxruntime.dll needs RuntimeIdentifier=win-x64 above to
+             get resolved/copied); the actual C# API lives in Microsoft.ML.OnnxRuntime.Managed, which we
+             must reference directly too, or Godot.NET.Sdk won't copy it to the output dir (Godot's own
+             launch path resolves dependencies from the NuGet cache via deps.json instead of copying them
+             locally; our mod loader has no such resolution and loads SpireBot.dll standalone, so every
+             dependency it needs must physically sit next to it in mods\SpireBot\). -->
+        <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.20.1" />
+        <PackageReference Include="Microsoft.ML.OnnxRuntime.Managed" Version="1.20.1" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <None Condition="Exists('Directory.Build.props')" Include="Directory.Build.props"/>
+        <None Include=".gitignore" />
+        <None Include="SpireBot.json" />
+        <None Include="local.props.template" />
+        <None Include="Sts2PathDiscovery.props" />
+    </ItemGroup>
+
+    <Target Name="CheckDependencyPaths">
+        <Error
+                Text=" Slay the Spire 2 data not found at path '$(Sts2DataDir)'"
+                Condition="'$(Sts2DataDir)' == '' or !Exists('$(Sts2DataDir)')" />
+    </Target>
+
+    <Target Name="CopyToModsFolderOnBuild" AfterTargets="PostBuildEvent">
+        <ItemGroup>
+            <!-- Everything else dotnet build put in the output dir: the ONNX Runtime managed wrapper,
+                 its native onnxruntime.dll/onnxruntime_providers_shared.dll, and any other copy-local
+                 dependency — EXCEPT GodotSharp*.dll, which the game already provides in-process. -->
+            <SpireBotOtherOutputFiles Include="$(TargetDir)*.dll" Exclude="$(TargetPath);$(TargetDir)GodotSharp*.dll" />
+        </ItemGroup>
+        <Message Text="Copying .dll .pdb .json and native runtime files to mods folder." Importance="high" />
+        <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(ModsPath)$(MSBuildProjectName)/" />
+        <Copy SourceFiles="$(MSBuildProjectName).json" DestinationFolder="$(ModsPath)$(MSBuildProjectName)/" />
+        <Copy SourceFiles="$(TargetDir)$(TargetName).pdb" DestinationFolder="$(ModsPath)$(MSBuildProjectName)/" Condition="Exists('$(TargetDir)$(TargetName).pdb')" />
+        <Copy SourceFiles="@(SpireBotOtherOutputFiles)" DestinationFolder="$(ModsPath)$(MSBuildProjectName)/" Condition="'@(SpireBotOtherOutputFiles)' != ''" />
+    </Target>
+</Project>
