@@ -277,11 +277,8 @@ public static class BotController
             return;
         }
 
-        if (!TryLoadContract())
+        if (!PrepareDriver())
             return;
-
-        SelectPolicy();
-        ThinkingOverlay.Ensure();
 
         if (NGame.Instance == null)
         {
@@ -302,6 +299,89 @@ public static class BotController
             return;
         }
 
+        BeginDriving(seed, SpireBotConfig.StartPaused);
+
+        GD.Print($"[SpireBot] BotController.StartBotRun — character={character.Id} " +
+                 $"seed='{seed}' ascension=0");
+
+        NAudioManager.Instance?.StopMusic();
+        SfxCmd.Play(character.CharacterTransitionSfx);
+
+        // RunReplayMenu.cs:638-646 — same call shape, minus the replay-log plumbing:
+        //   NGame.Instance.StartNewSingleplayerRun(character, shouldSave, acts, modifiers,
+        //       seed, gameMode, ascensionLevel)
+        TaskHelper.RunSafely(
+            NGame.Instance.StartNewSingleplayerRun(
+                character,
+                shouldSave: true,
+                ActModel.GetDefaultList(),
+                [],
+                seed,
+                GameMode.Standard,
+                0));
+
+        Subscribe();
+    }
+
+    /// <summary>
+    /// Attaches the decision loop to a run that is ALREADY in progress — one the player resumed
+    /// with the game's own Continue button (see <see cref="RunContinueAttach"/>) rather than one
+    /// this class started. Always attaches PAUSED: the bot advises, the human plays, and Play
+    /// hands the run over whenever they want it to.
+    ///
+    /// Everything <see cref="StartBotRun"/> does per run happens here too, minus the parts that
+    /// only make sense for a brand-new run — resolving the character, the transition sfx, and
+    /// the <c>StartNewSingleplayerRun</c> call itself. One consequence of attaching mid-run is
+    /// that <see cref="SessionState"/> starts empty, so the ACCUMULATE-shaped observation
+    /// features (enemy intent history in particular) are blank until the current combat has run
+    /// a turn or two. The advice is still well-formed, just slightly less informed on the first
+    /// combat after attaching.
+    /// </summary>
+    /// <param name="seed">The resumed run's seed, used only to name the decision-dump directory.</param>
+    public static void AttachToRun(string seed)
+    {
+        if (_running)
+        {
+            GD.Print("[SpireBot] BotController.AttachToRun called while already running — ignoring.");
+            return;
+        }
+
+        if (!PrepareDriver())
+            return;
+
+        // startPaused is hard-coded rather than read from config: this entry point exists to
+        // advise a human who is playing, so taking over their resumed run unannounced would be
+        // the one behavior nobody asked for. SpireBotConfig.StartPaused gates whether we attach
+        // at all (RunContinueAttach), not whether we then drive.
+        BeginDriving(seed, startPaused: true);
+
+        GD.Print($"[SpireBot] BotController.AttachToRun — advising the in-progress run " +
+                 $"seed='{seed}' (paused; press Play to hand it over).");
+
+        Subscribe();
+    }
+
+    /// <summary>Loads the contract, picks the policy, and makes sure the overlay exists — the
+    /// setup both entry points need before any per-run state is touched. False means the
+    /// contract failed to load and the caller must abort without having changed anything.</summary>
+    private static bool PrepareDriver()
+    {
+        if (!TryLoadContract())
+            return false;
+
+        SelectPolicy();
+        ThinkingOverlay.Ensure();
+        return true;
+    }
+
+    /// <summary>
+    /// Per-run state reset shared by <see cref="StartBotRun"/> and <see cref="AttachToRun"/>:
+    /// marks the driver attached, applies the starting pause and speed, and clears every piece
+    /// of run-scoped memory. Callers still own their own <see cref="Subscribe"/> call, because
+    /// StartBotRun must subscribe only after it has kicked off the new run.
+    /// </summary>
+    private static void BeginDriving(string seed, bool startPaused)
+    {
         _running = true;
         // Tells the vendored replay-side patches/screen captures that a driver is attached, so
         // they populate ReplayState — without this the dispatcher enumerates nothing and the
@@ -309,12 +389,12 @@ public static class BotController
         ReplayEngine.BotDriving = true;
         // A pause left over from a previous run must not silently hold the new one, and a step
         // or preview held when the last run ended must not survive into this one. The Paused
-        // setter discards both only on the FALSE transition, so assigning StartPaused directly
+        // setter discards both only on the FALSE transition, so assigning startPaused directly
         // could carry a stale preview across runs — where Step would then commit a command
-        // chosen against a board that no longer exists. Clear first, then apply the configured
+        // chosen against a board that no longer exists. Clear first, then apply the requested
         // starting state. The two assignments are the reset; neither is redundant.
         Paused = false;
-        Paused = SpireBotConfig.StartPaused;
+        Paused = startPaused;
 
         // The vendored dispatcher fast-forwards a replay (_gameSpeed defaults to 2.0) and
         // re-asserts it whenever IsActive is true, which BotDriving now makes permanent. Pin it
@@ -339,27 +419,6 @@ public static class BotController
         // nothing ever invokes ReplayDispatcher.Reset() and the subscription never happens
         // (round 3 fix — see VENDORED-FROM.md delta 9).
         ReplayDispatcher.Reset();
-
-        GD.Print($"[SpireBot] BotController.StartBotRun — character={character.Id} " +
-                 $"seed='{seed}' ascension=0");
-
-        NAudioManager.Instance?.StopMusic();
-        SfxCmd.Play(character.CharacterTransitionSfx);
-
-        // RunReplayMenu.cs:638-646 — same call shape, minus the replay-log plumbing:
-        //   NGame.Instance.StartNewSingleplayerRun(character, shouldSave, acts, modifiers,
-        //       seed, gameMode, ascensionLevel)
-        TaskHelper.RunSafely(
-            NGame.Instance.StartNewSingleplayerRun(
-                character,
-                shouldSave: true,
-                ActModel.GetDefaultList(),
-                [],
-                seed,
-                GameMode.Standard,
-                0));
-
-        Subscribe();
     }
 
     /// <summary>Stops the bot decision loop. Does not end the in-progress run — it just stops

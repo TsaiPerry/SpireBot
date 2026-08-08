@@ -157,3 +157,73 @@ Manual acceptance, folded into the outstanding acceptance pass for the two prior
 - Attaching the bot as an advisor to a run started from the game's own New Run menu.
   `BotController` only observes runs it launched itself; that attach path is separate work.
 - Any change to the two non-blocking Minors ledgered from the preview review.
+
+---
+
+## Addendum — attaching to a continued run
+
+The original spec listed "attach to a run the player started from the game's own menu" as out of
+scope. That was wrong about what advisor mode is for: SpireBot only ever attached through its own
+"Bot Run" main-menu button, which always starts a *brand-new* Ironclad run, so pressing the game's
+Continue button produced no advice at all. This addendum closes that.
+
+**Scope (Perry's call, 2026-08-08):** Continue only, Ironclad only, gated on the same
+`StartPaused` flag. A fresh run started from the game's own character-select menu is still out of
+scope.
+
+### Component 6 — `RunContinueAttach`
+
+A new Harmony postfix on `RunManager.SetUpSavedSingleplayer`, in `SpireBotCode/RunContinueAttach.cs`.
+It does not touch the vendored `Replay/Patches/Record/RunContinuePatch.cs`, which patches the same
+method for an unrelated purpose; Harmony runs both.
+
+The hook is two-stage because the obvious single hook is mis-timed. `SetUpSavedSingleplayer` is
+`async Task` with a real await before it completes, so a postfix runs at the first await — after
+`RunManager.State` is assigned but before the caller's `NGame.LoadRun` has loaded the map, the
+room, or any screen. Attaching there would leave the loop grinding out `Unsupported` decisions once
+a second against a half-loaded run. So the postfix only **arms**, and the attach happens on the
+first `RunManager.RoomEntered`, the same readiness signal the vendored dispatcher keys its own
+dispatching off (`Replay/ReplayDispatcher.cs:944-956`).
+
+Declines, each logged so a run that silently gets no advice always says why: `StartPaused` off
+(Continue then behaves exactly as before this feature), a run already being driven, a non-Standard
+`GameMode`, or a saved character whose `Players[0].CharacterId.Entry` is not `IRONCLAD` — the
+policy's action space and observations are Ironclad's, so advising another character would be
+confidently wrong rather than absent.
+
+`Disarm()` is called on the attach itself and from `MenuInjection` when the main menu is reached.
+Without the latter, abandoning a resumed run before its first room loaded would leave the latch
+subscribed, and the next run to enter a room would be attached to under the abandoned run's seed.
+
+The postfix also fires for the game's debug drag-and-drop save loader (`FileDropHandler.cs:75`),
+the only other caller. That path is a dev convenience and gets the same advisor treatment, which
+is harmless.
+
+### Component 7 — `BotController.AttachToRun`
+
+`StartBotRun`'s body splits into three pieces so the two entry points share one implementation:
+
+- `PrepareDriver()` — contract, policy, overlay. Returns false without having changed any state.
+- `BeginDriving(seed, startPaused)` — the whole per-run reset, including the pause/speed
+  application. `startPaused` is the parameter that was `SpireBotConfig.StartPaused` inline.
+- `AttachToRun(seed)` — `PrepareDriver` + `BeginDriving(seed, startPaused: true)` + `Subscribe`.
+
+`AttachToRun` hard-codes paused rather than reading config: this entry point exists to advise a
+human who is playing, so taking over their resumed run unannounced is the one behavior nobody
+asked for. `StartPaused` gates whether the bot attaches at all, not whether it then drives.
+
+Attaching mid-run starts `SessionState` empty, so the ACCUMULATE-shaped observation features
+(enemy intent history in particular) are blank until the current combat has run a turn or two. The
+advice is well-formed, just less informed on the first combat after attaching.
+
+### Testing
+
+No new `BotControlSelfTest` assertions: every decline in `ShouldAttach` needs a `SerializableRun`,
+and `AttachToRun` needs a live run — neither is constructible at mod init. Verified in game:
+
+1. Continue an Ironclad run. Expect an armed log line, then an attach line on the first room, then
+   `Will take: ...`, with the game at 1.0x and the bar reading `▶ Play`.
+2. Play on manually; advice refreshes. Press Play; the bot takes over.
+3. Quit to the main menu mid-run, then Continue again — expect a fresh arm/attach, no duplicate.
+4. Continue a non-Ironclad run: expect the decline log line and no overlay advice.
+5. With `StartPaused` off, Continue attaches nothing at all.
