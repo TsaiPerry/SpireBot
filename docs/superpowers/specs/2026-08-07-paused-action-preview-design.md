@@ -80,13 +80,60 @@ Two ordering requirements in that snippet:
   invariant established when the speed control shipped: a step armed while a command is still in
   flight must survive to the next cycle rather than being silently spent.
 
-**Three suppressions while `_previewing`**, all required because the loop now re-runs on every
-heartbeat (1 s) while paused rather than not running at all:
+### Component 1a — recompute only when the state changes
+
+The heartbeat fires every second while paused, but re-running ONNX inference every second to
+produce an identical answer is waste. The loop therefore short-circuits when nothing
+decision-relevant has changed since the held action was computed.
+
+`BuildDecisionKey(ctx)` (`BotController.cs:772`) already exists for precisely this judgement —
+`AdvanceStuckGuard` uses it to decide whether a decision "recurred with no observed state change".
+Reusing it keeps a single definition of that concept rather than inventing a second one:
+
+```csharp
+ctx = DecisionContext.Capture(_session);
+RoomOneShots.OnDecision(ctx);        // idempotent room-boundary resets; safe to re-run
+RewardClaimMemory.OnDecision(ctx);
+
+// Preview refresh gate: keep the held action when the situation is unchanged.
+if (_previewing && _pending != null && BuildDecisionKey(ctx) == _pending.Key)
+    return;
+
+map = ActionMap.Build(_contract!, ctx, _session);
+...
+```
+
+Placed here it skips all three expensive steps — `ActionMap.Build`, `ObsBuilder.Build`, and the
+policy's ONNX inference — leaving only `DecisionContext.Capture` and a string comparison per
+heartbeat. Both `OnDecision` calls are idempotent room-boundary resets (they no-op unless the room
+key changed), so running them above the gate is safe.
+
+**The key must be stored on `_pending`, not compared against `_lastDecisionKey`.**
+`AdvanceStuckGuard` owns `_lastDecisionKey` and does not run while previewing, so that field goes
+stale during a pause; reading it here would compare against whatever the last *executed* decision
+was.
+
+**Known bound on precision.** `BuildDecisionKey` covers kind, room, act, floor, current HP, gold,
+and the `ToString()` of every available command — which for a card play is its hand *index* and
+target, not the card's identity. It does not cover enemy HP, block, energy, or powers. In practice
+this is sufficient, because a paused bot is not acting and the game is idle waiting for input, and
+because `_pending` is cleared on every commit so each Step forces a full recompute regardless. If a
+stale preview is ever observed in play, the fix is to widen the key — but note that doing so also
+changes stuck-guard sensitivity, so it needs its own thought rather than a quick edit.
+
+Each actual recompute logs one line (`preview refreshed: <action>`), which is what makes
+"inference is not running every second" observable during verification.
+
+### Suppressions
+
+**Three suppressions on the full-recompute path while `_previewing`.** These are needed because a
+preview is a decision that never executes, and both the stuck guard and the dumper assume every
+decision they see is one the bot acted on:
 
 1. **`AdvanceStuckGuard`** — skipped, and **not deferred to commit either**. It counts identical
-   consecutive decisions with no state change, which is precisely what a pause produces; left
-   running it would hit its repeat threshold within a few seconds of pausing and force a fallback
-   dispatch.
+   consecutive decisions against `_lastDecisionKey`, which tracks the last *executed* decision;
+   folding previews into that counter corrupts its accounting relative to what the bot actually
+   did, and can push `_repeatCount` toward its threshold without a single real repeat.
 
    Deferring it to commit time is *also* wrong, and this is subtle: `AdvanceStuckGuard` returning
    false makes `RunDecision` call `DispatchWithFallback(..., forceFallback: true)`, which chooses a
@@ -96,8 +143,9 @@ heartbeat (1 s) while paused rather than not running at all:
    genuinely stuck state will not auto-recover; that is acceptable, because a human is watching and
    stepping deliberately, which is the situation the automatic guard exists to substitute for.
    Normal (unpaused) play is unaffected — the guard runs exactly as it does today.
-2. **`DecisionDumper.Write`** — skipped while previewing, or a paused run writes one dump line per
-   second. This one **is** deferred to commit, so dumps continue to record actions actually taken.
+2. **`DecisionDumper.Write`** — skipped while previewing, or the dump file gains a line for every
+   action merely *considered*. This one **is** deferred to commit, so dumps continue to record
+   exactly the actions actually taken, which is what makes them usable for offline analysis.
    It is skipped when the held action has no `PolicyResult` (the auto-advance and
    `HandleUnsupported` paths), matching today's behavior where those paths never dump either.
 3. **`ActionExecutor.Execute`** — replaced by the cache (see Component 2). This also spares the
@@ -110,7 +158,8 @@ heartbeat (1 s) while paused rather than not running at all:
 ```csharp
 private sealed record PendingAction(
     ReplayCommand Cmd, DecisionKind Kind,
-    DecisionContext Ctx, ActionMap Map, ObsResult? Obs, PolicyResult? Result);
+    DecisionContext Ctx, ActionMap Map, ObsResult? Obs, PolicyResult? Result,
+    string Key);   // BuildDecisionKey(Ctx) at the time it was computed — see Component 1a
 
 private static PendingAction? _pending;
 public static bool HasPendingPreview => _pending != null;
@@ -130,8 +179,9 @@ Two distinct entry points, so neither has to branch on how it was reached:
   `held.Result` is non-null), then `ActionExecutor.Execute(held.Cmd, held.Kind)`. It does **not**
   run `AdvanceStuckGuard`, for the reason given above.
 
-The cache is **overwritten every heartbeat** while paused, so it is at most ~1 s stale. It is
-cleared on unpause, on `StartBotRun`, and on `Stop`.
+The cache is refreshed only when `BuildDecisionKey` changes (Component 1a), so a held action
+persists across an idle pause instead of being recomputed each second. It is cleared on unpause, on
+`StartBotRun`, on `Stop`, and on every commit.
 
 ### Component 3 — Step commits the held action
 
@@ -177,11 +227,16 @@ The top-K rows continue to come from `DecisionMade` and are simply absent on the
 ## Data flow
 
 ```
-paused, heartbeat fires
+paused, heartbeat fires, nothing has changed
   -> OnInputRequired: _previewing = IsGated() = true
-  -> RunDecision: Capture -> Build -> Obs -> (stuck guard SKIPPED)
+  -> RunDecision: Capture -> key == _pending.Key -> RETURN
+       (no ActionMap.Build, no ObsBuilder.Build, no ONNX inference)
+
+paused, heartbeat fires, state HAS changed (or no preview held yet)
+  -> OnInputRequired: _previewing = IsGated() = true
+  -> RunDecision: Capture -> key differs -> Build -> Obs -> (stuck guard SKIPPED)
        -> policy chooses -> DecisionMade fires (top-K renders)
-       -> Dispatch(...) sees _previewing -> _pending = {cmd, ...}; NOTHING executes
+       -> Dispatch(...) sees _previewing -> _pending = {cmd, ..., key}; NOTHING executes
   -> _Process: _actionLabel = "Will take: Play Strike -> Slime"
 
 user clicks Step
@@ -218,8 +273,9 @@ verified in game:
    `ReplayDispatcher.cs`).
 2. In game (launch via Steam):
    - Pause mid-run. Within ~1 s the overlay shows `Will take: ...` and the bot does **not** act.
-   - Wait 30 s paused: no dump lines accumulate, no stuck-recovery/forced-fallback fires, and the
-     preview refreshes rather than freezing.
+   - Wait 30 s paused: no dump lines accumulate, no stuck-recovery/forced-fallback fires, and —
+     with the game idle — exactly **one** `preview refreshed:` line appears for the whole pause,
+     not one per second. That line is the evidence inference is state-driven, not timer-driven.
    - Press Step: the bot takes **exactly** the previewed action, then re-pauses and previews the
      next one.
    - Set `Temperature` above 0 and repeat — the executed action must still match the preview
