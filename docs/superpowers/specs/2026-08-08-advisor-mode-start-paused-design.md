@@ -187,8 +187,9 @@ dispatching off (`Replay/ReplayDispatcher.cs:944-956`).
 
 Declines, each logged so a run that silently gets no advice always says why: `StartPaused` off
 (Continue then behaves exactly as before this feature), a run already being driven, a non-Standard
-`GameMode`, or a saved character whose `Players[0].CharacterId.Entry` is not `IRONCLAD` — the
-policy's action space and observations are Ironclad's, so advising another character would be
+`GameMode`, a saved character whose `Players[0].CharacterId.Entry` is not `IRONCLAD`, or a
+non-zero `Ascension`. The last two are the same argument: the policy's action space and
+observations are Ironclad's and it was trained at ascension 0, so advising outside that would be
 confidently wrong rather than absent.
 
 `Disarm()` is called on the attach itself and from `MenuInjection` when the main menu is reached.
