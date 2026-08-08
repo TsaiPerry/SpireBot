@@ -79,7 +79,7 @@ public sealed partial class BotControlBar : HBoxContainer
 
     /// <summary>Records the user's chosen multiplier: in memory, on disk (debounced), and — via
     /// <see cref="ApplyEffectiveSpeed"/> — in the running game. Writing SpireBotConfig is what
-    /// makes a live change survive StartBotRun's re-pin (BotController.cs:155) into the next
+    /// makes a live change survive StartBotRun's re-pin (BotController.cs:189) into the next
     /// run.</summary>
     private static void SetSelectedSpeed(float speed)
     {
@@ -110,7 +110,10 @@ public sealed partial class BotControlBar : HBoxContainer
     /// calls it every frame rather than wiring change events for a five-widget bar.</summary>
     public void RefreshControls()
     {
-        // _Ready may not have run yet the first frame after construction.
+        // Defensive only: today ThinkingOverlay constructs and AddChild's this bar inside its own
+        // _Ready, and Godot runs a child's _Ready synchronously during AddChild, so these fields
+        // are always set by the time RefreshControls can run. Guards against a future caller
+        // invoking this before the node is ready.
         if (_pauseButton == null || _stepButton == null || _speedLabel == null) return;
 
         Visible = BotController.IsRunning;

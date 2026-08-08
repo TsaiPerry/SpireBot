@@ -74,9 +74,16 @@ internal static class StuckRecovery
         if (++_blockedTicks < StuckSeconds)
             return;
 
-        GD.PrintErr($"[SpireBot] StuckRecovery: nothing dispatchable for {_blockedTicks}s with " +
-                    $"in-flight flags set ({Describe()}) — force-clearing them. This means a " +
-                    "command's completion path never ran; the underlying gap is worth fixing.");
+        // The clear itself always happens (below); only the log is conditional. A deliberate
+        // pause is an expected, normal way to land here — the user parked the bot mid-animation
+        // — so the "completion path never ran, worth fixing at the source" framing would be
+        // false alarm noise on every long pause, not a symptom of a real gap.
+        if (!BotController.Paused)
+        {
+            GD.PrintErr($"[SpireBot] StuckRecovery: nothing dispatchable for {_blockedTicks}s with " +
+                        $"in-flight flags set ({Describe()}) — force-clearing them. This means a " +
+                        "command's completion path never ran; the underlying gap is worth fixing.");
+        }
 
         ReplayState.CardPlayInFlight = false;
         ReplayState.PotionInFlight = false;

@@ -407,9 +407,9 @@ public static class BotController
     {
         if (!_running) return;
 
-        // Held by the overlay's pause control. Checked BEFORE the HasPendingCommand return below
-        // so that a Step clicked while a command is still in flight is not silently swallowed by
-        // it — the step stays armed until a decision really runs.
+        // Held by the overlay's pause control. Neither this guard nor the HasPendingCommand one
+        // below consumes _stepOnce — that happens only just above RunDecision(), after both — so
+        // a step stays armed across any number of early returns until a decision actually runs.
         if (IsGated()) return;
 
         // Skip pulses fired while our own dispatched command is still in flight — those are
@@ -449,11 +449,12 @@ public static class BotController
     {
         if (!_running) return;
 
-        // A paused run must not look like a stalled one. StuckRecovery counts no-progress time,
-        // so ticking it through a deliberate pause would fire recovery while the user is just
-        // inspecting the board.
-        if (!IsGated())
-            StuckRecovery.Tick();
+        // Unconditional, including while paused: Tick() is self-guarding — on a healthy idle
+        // board nothing is in flight/blocked, so it zeroes its counter and returns immediately.
+        // Gating it here would only matter for a command that genuinely wedged mid-pause, and
+        // that's exactly the case recovery must not be suppressed for — a whole pause of
+        // silence would leave the run stuck with no sign of it in the log.
+        StuckRecovery.Tick();
 
         OnInputRequired();
 
