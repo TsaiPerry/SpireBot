@@ -93,14 +93,6 @@ internal static class RewardClaimMemory
         return RewardScreenClassifier.ResolveRewardKind(claim.RewardIndex) == RewardKind.Card;
     }
 
-    /// <summary>
-    /// Called by <see cref="BotController.TryAutoAdvance"/> right before it would dispatch
-    /// <paramref name="claim"/> as an interstitial. Applies the loop backstop (brief #4): once
-    /// this RewardIndex has already been auto-advanced <see cref="MaxAutoAdvancesBeforeForcedDecline"/>
-    /// times without resolving, forces a decline (loud log) and returns false instead of
-    /// dispatching a 4th time. Otherwise records this claim as the currently-open one (for
-    /// <see cref="Record"/>'s join), bumps the count, and returns true.
-    /// </summary>
     /// <summary>Read-only probe of <see cref="TryBeginAutoAdvance"/>'s decision, for the paused
     /// preview (paused-action-preview spec): selection during a preview must not mutate the
     /// loop-backstop counter, or aborted previews would burn claim attempts the bot never made.
@@ -112,6 +104,14 @@ internal static class RewardClaimMemory
         => (_autoAdvanceCounts.TryGetValue(claim.RewardIndex, out int c) ? c : 0)
            < MaxAutoAdvancesBeforeForcedDecline;
 
+    /// <summary>
+    /// Called by <see cref="BotController.TryAutoAdvance"/> right before it would dispatch
+    /// <paramref name="claim"/> as an interstitial. Applies the loop backstop (brief #4): once
+    /// this RewardIndex has already been auto-advanced <see cref="MaxAutoAdvancesBeforeForcedDecline"/>
+    /// times without resolving, forces a decline (loud log) and returns false instead of
+    /// dispatching a 4th time. Otherwise records this claim as the currently-open one (for
+    /// <see cref="Record"/>'s join), bumps the count, and returns true.
+    /// </summary>
     internal static bool TryBeginAutoAdvance(ClaimRewardCommand claim)
     {
         int count = _autoAdvanceCounts.TryGetValue(claim.RewardIndex, out int c) ? c : 0;
