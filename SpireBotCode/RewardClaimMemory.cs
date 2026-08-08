@@ -101,6 +101,17 @@ internal static class RewardClaimMemory
     /// dispatching a 4th time. Otherwise records this claim as the currently-open one (for
     /// <see cref="Record"/>'s join), bumps the count, and returns true.
     /// </summary>
+    /// <summary>Read-only probe of <see cref="TryBeginAutoAdvance"/>'s decision, for the paused
+    /// preview (paused-action-preview spec): selection during a preview must not mutate the
+    /// loop-backstop counter, or aborted previews would burn claim attempts the bot never made.
+    /// The probe and the deferred real call cannot disagree — the counter mutates only on
+    /// commits and unpaused dispatches, neither of which can interleave between a preview and
+    /// its own commit. Declined indexes are already excluded upstream by
+    /// <see cref="IsPendingCardClaim"/>.</summary>
+    internal static bool CanAutoAdvance(ClaimRewardCommand claim)
+        => (_autoAdvanceCounts.TryGetValue(claim.RewardIndex, out int c) ? c : 0)
+           < MaxAutoAdvancesBeforeForcedDecline;
+
     internal static bool TryBeginAutoAdvance(ClaimRewardCommand claim)
     {
         int count = _autoAdvanceCounts.TryGetValue(claim.RewardIndex, out int c) ? c : 0;

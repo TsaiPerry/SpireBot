@@ -80,6 +80,24 @@ public static class BotControlSelfTest
                         $"ladder value {step} is not a multiple of the slider's {SliderStep} step.");
             }
 
+            // Pause/step/preview gate state machine (paused-action-preview spec). Safe to
+            // exercise at mod init: no run is active (BotController._running is false), so
+            // arming a step here can never fire a decision, and StartBotRun resets Paused
+            // anyway. Only the pure state transitions are asserted — the preview cache itself
+            // can only fill during a live run, so here it must stay empty throughout.
+            BotController.StepOnce();
+            if (!BotController.Paused)
+                throw new Exception("StepOnce() must imply Paused.");
+            if (!BotController.StepArmed)
+                throw new Exception("StepOnce() with nothing held must arm a step.");
+            if (BotController.HasPendingPreview)
+                throw new Exception("no preview can exist before any decision has run.");
+            BotController.Paused = false;
+            if (BotController.StepArmed)
+                throw new Exception("unpausing must discard an armed step.");
+            if (BotController.HasPendingPreview)
+                throw new Exception("unpausing must leave no held preview.");
+
             GD.Print($"[SpireBot] BotControlSelfTest OK (ladder: {string.Join(", ", steps)})");
         }
         catch (Exception ex)
