@@ -35,6 +35,7 @@ public sealed partial class ThinkingOverlay : CanvasLayer
     private Label _kindLabel = null!;
     private Label _actionLabel = null!;
     private VBoxContainer _topKBox = null!;
+    private BotControlBar _controlBar = null!;
 
     /// <summary>
     /// Idempotently ensures the overlay node exists in the scene tree and is subscribed to
@@ -110,10 +111,13 @@ public sealed partial class ThinkingOverlay : CanvasLayer
         var vbox = new VBoxContainer();
         panel.AddChild(vbox);
 
+        _controlBar = new BotControlBar();
         _kindLabel = MakeLabel("Decision: <none yet>");
         _actionLabel = MakeLabel("Chosen: <none yet>");
         _topKBox = new VBoxContainer();
 
+        // First row, above the decision text — same placement as RunReplays' control bar.
+        vbox.AddChild(_controlBar);
         vbox.AddChild(_kindLabel);
         vbox.AddChild(_actionLabel);
         vbox.AddChild(_topKBox);
@@ -180,6 +184,10 @@ public sealed partial class ThinkingOverlay : CanvasLayer
     public override void _Process(double delta)
     {
         UpdateVisibility();
+        // Driven from _Process rather than from BotController.DecisionMade: that event can fire
+        // from dispatch-signal context (see this class's header comment), whereas _Process is
+        // always the main thread, so the bar needs no CallDeferred juggling.
+        _controlBar.RefreshControls();
     }
 
     private void UpdateVisibility()
