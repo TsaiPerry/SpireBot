@@ -44,6 +44,7 @@ public static class MainFile
         if (SpireBotConfig.SelfChecks)
         {
             ContractSelfTest.Run();
+            BotControlSelfTest.Run();
         }
     }
 }
