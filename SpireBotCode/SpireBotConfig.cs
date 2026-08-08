@@ -43,6 +43,14 @@ public class SpireBotConfig : SimpleModConfig
     public static float GameSpeed { get; set; } = 1.0f;
 
     /// <summary>
+    /// When true (the default), a bot run begins paused: the bot never acts on its own, and the
+    /// overlay shows the action it would take, so a human can play the run manually with the
+    /// policy as an advisor. Press Play on the overlay to hand the run over to the bot at any
+    /// point. Turn this off for autonomous grind runs, which should start driving immediately.
+    /// </summary>
+    public static bool StartPaused { get; set; } = true;
+
+    /// <summary>
     /// Runs the contract self-test at startup and the per-decision observation self-check.
     /// These were originally gated on <c>OS.IsDebugBuild()</c>, which is always false in the
     /// shipped game (it runs as an export_release build) — so they never executed where they

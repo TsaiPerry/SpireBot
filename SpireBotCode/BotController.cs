@@ -307,12 +307,21 @@ public static class BotController
         // they populate ReplayState — without this the dispatcher enumerates nothing and the
         // bot stalls on its first decision (see ReplayEngine.BotDriving).
         ReplayEngine.BotDriving = true;
+        // A pause left over from a previous run must not silently hold the new one, and a step
+        // or preview held when the last run ended must not survive into this one. The Paused
+        // setter discards both only on the FALSE transition, so assigning StartPaused directly
+        // could carry a stale preview across runs — where Step would then commit a command
+        // chosen against a board that no longer exists. Clear first, then apply the configured
+        // starting state. The two assignments are the reset; neither is redundant.
+        Paused = false;
+        Paused = SpireBotConfig.StartPaused;
+
         // The vendored dispatcher fast-forwards a replay (_gameSpeed defaults to 2.0) and
         // re-asserts it whenever IsActive is true, which BotDriving now makes permanent. Pin it
-        // to the configured speed so a bot run doesn't silently double-speed the game.
-        ReplayDispatcher.GameSpeed = SpireBotConfig.GameSpeed;
-        // A pause left over from a previous run must not silently hold the new one.
-        Paused = false;
+        // so a bot run doesn't silently double-speed the game — and so a run that starts paused
+        // for manual play runs at 1.0x. Must follow the pause assignment above: the effective
+        // speed depends on it.
+        ApplyEffectiveSpeed();
         _lastDecisionKey = null;
         _repeatCount = 0;
         StallDiagnostics.Reset();
