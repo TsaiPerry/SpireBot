@@ -188,6 +188,18 @@ public sealed partial class ThinkingOverlay : CanvasLayer
         // from dispatch-signal context (see this class's header comment), whereas _Process is
         // always the main thread, so the bar needs no CallDeferred juggling.
         _controlBar.RefreshControls();
+
+        // Paused action preview (paused-action-preview spec, Component 4): while an action is
+        // held, the action line reads as a forecast. Sourced from the cache rather than
+        // DecisionMade because HandleUnsupported's two paths never fire that event — relabeling
+        // in ApplyDecision would leave them previewing an action the overlay never showed.
+        // _Process runs after any deferred ApplyDecision, so while a preview is pending this
+        // wins; once it clears (commit or unpause), the label falls back to whatever
+        // ApplyDecision last wrote — after a commit that is the same action, now accurately
+        // labeled "Chosen:".
+        string? preview = BotController.PendingPreviewDescription;
+        if (preview != null)
+            _actionLabel.Text = $"Will take: {preview}";
     }
 
     private void UpdateVisibility()
