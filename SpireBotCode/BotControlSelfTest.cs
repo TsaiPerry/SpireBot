@@ -2,6 +2,7 @@ using System;
 
 using Godot;
 
+using SpireBot.Replay;
 using SpireBot.SpireBotCode.Overlay;
 
 namespace SpireBot.SpireBotCode;
@@ -97,6 +98,29 @@ public static class BotControlSelfTest
                 throw new Exception("unpausing must discard an armed step.");
             if (BotController.HasPendingPreview)
                 throw new Exception("unpausing must leave no held preview.");
+
+            // Effective-speed rule (advisor-mode spec, Component 3): one owner for
+            // selected-vs-applied speed, so the pause button and a run that starts paused can
+            // never disagree. Both the pause flag and the dispatcher speed are restored below —
+            // this runs at mod init, and leaving either changed would mis-start the next run.
+            bool pausedBefore = BotController.Paused;
+            float dispatcherSpeedBefore = ReplayDispatcher.GameSpeed;
+            float selected = SpireBotConfig.GameSpeed;
+
+            BotController.Paused = true;
+            BotController.ApplyEffectiveSpeed();
+            if (Math.Abs(ReplayDispatcher.GameSpeed - 1.0f) > Tolerance)
+                throw new Exception(
+                    $"paused must apply 1.0x, got {ReplayDispatcher.GameSpeed}.");
+
+            BotController.Paused = false;
+            BotController.ApplyEffectiveSpeed();
+            if (Math.Abs(ReplayDispatcher.GameSpeed - selected) > Tolerance)
+                throw new Exception(
+                    $"unpaused must apply the selected {selected}x, got {ReplayDispatcher.GameSpeed}.");
+
+            BotController.Paused = pausedBefore;
+            ReplayDispatcher.GameSpeed = dispatcherSpeedBefore;
 
             GD.Print($"[SpireBot] BotControlSelfTest OK (ladder: {string.Join(", ", steps)})");
         }

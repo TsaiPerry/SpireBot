@@ -88,23 +88,11 @@ public sealed partial class BotControlBar : HBoxContainer
         ApplyEffectiveSpeed();
     }
 
-    /// <summary>
-    /// Pushes the multiplier the game should actually be running at right now: the user's
-    /// selection while the bot is deciding, 1.0 while paused so the board can be read at normal
-    /// speed.
-    ///
-    /// This MUST go through ReplayDispatcher.GameSpeed rather than assigning Engine.TimeScale
-    /// directly. The vendored ExecuteNext re-asserts TimeScale from its own _gameSpeed field on
-    /// every dispatch (Replay/ReplayDispatcher.cs:1112-1114), above its own paused check.
-    /// RunReplays can assign TimeScale directly on pause only because its pause also
-    /// short-circuits TryDispatch (Replay/ReplayDispatcher.cs:1046) so ExecuteNext never runs;
-    /// SpireBot's pause deliberately leaves that path running, so a direct assignment here would
-    /// be stomped back to the fast value within a frame.
-    /// </summary>
-    private static void ApplyEffectiveSpeed()
-    {
-        ReplayDispatcher.GameSpeed = BotController.Paused ? 1.0f : SpireBotConfig.GameSpeed;
-    }
+    /// <summary>Pushes the multiplier the game should actually be running at right now.
+    /// The rule and its full TimeScale rationale live on
+    /// <see cref="BotController.ApplyEffectiveSpeed"/>, which a run that starts paused also
+    /// calls — one owner, so the two paths can never disagree.</summary>
+    private static void ApplyEffectiveSpeed() => BotController.ApplyEffectiveSpeed();
 
     /// <summary>Re-renders the bar from current state. Cheap and idempotent — ThinkingOverlay
     /// calls it every frame rather than wiring change events for a five-widget bar.</summary>
