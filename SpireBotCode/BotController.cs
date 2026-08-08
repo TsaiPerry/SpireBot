@@ -56,6 +56,40 @@ public static class BotController
     /// <summary>True while the bot decision loop is driving a run (StartBotRun..Stop).
     /// MenuInjection uses this to stop an abandoned bot run when the main menu is reached.</summary>
     public static bool IsRunning => _running;
+
+    private static bool _paused;
+    private static bool _stepOnce;
+
+    /// <summary>
+    /// True while the decision loop is held by the overlay's pause control (BotControlBar).
+    /// A paused bot stops *choosing* actions; a command already dispatched still runs to
+    /// completion, because the bot enqueues into the vendored dispatcher rather than acting
+    /// directly. Reset at every <see cref="StartBotRun"/> and <see cref="Stop"/>.
+    /// </summary>
+    public static bool Paused
+    {
+        get => _paused;
+        set
+        {
+            _paused = value;
+            // Leaving pause discards an un-consumed step, so pausing again later doesn't hand out
+            // a free decision the user never asked for.
+            if (!value) _stepOnce = false;
+        }
+    }
+
+    /// <summary>Lets exactly one more decision through, then leaves the loop paused. Implies
+    /// <see cref="Paused"/>, so it is also the "pause at the next decision" control.</summary>
+    public static void StepOnce()
+    {
+        _paused = true;
+        _stepOnce = true;
+    }
+
+    /// <summary>The single definition of "the decision loop is currently held", used by both
+    /// <see cref="OnHeartbeat"/> and <see cref="OnInputRequired"/> so the two can never disagree.</summary>
+    private static bool IsGated() => _paused && !_stepOnce;
+
     private static bool _subscribed;
     private static Contract? _contract;
     private static Callable _inputRequiredHandler;
@@ -153,6 +187,8 @@ public static class BotController
         // re-asserts it whenever IsActive is true, which BotDriving now makes permanent. Pin it
         // to the configured speed so a bot run doesn't silently double-speed the game.
         ReplayDispatcher.GameSpeed = SpireBotConfig.GameSpeed;
+        // A pause left over from a previous run must not silently hold the new one.
+        Paused = false;
         _lastDecisionKey = null;
         _repeatCount = 0;
         StallDiagnostics.Reset();
@@ -199,6 +235,11 @@ public static class BotController
     {
         _running = false;
         ReplayEngine.BotDriving = false;
+        Paused = false;
+        // BotDriving going false makes ReplayEngine.IsActive false, after which nothing re-asserts
+        // OR resets Engine.TimeScale — without this the game is left running at whatever
+        // multiplier the bot used, with no way back short of a restart.
+        ReplayDispatcher.RestoreGameSpeed();
         Unsubscribe();
         UnsubscribeCombatHooks();
         GD.Print("[SpireBot] BotController.Stop — decision loop stopped.");
@@ -366,11 +407,19 @@ public static class BotController
     {
         if (!_running) return;
 
+        // Held by the overlay's pause control. Checked BEFORE the HasPendingCommand return below
+        // so that a Step clicked while a command is still in flight is not silently swallowed by
+        // it — the step stays armed until a decision really runs.
+        if (IsGated()) return;
+
         // Skip pulses fired while our own dispatched command is still in flight — those are
         // that dispatch's bookkeeping, not a new decision. Deliberately NOT ReplayEngine
         // .IsActive: that is now true for the whole bot run (ReplayEngine.BotDriving), so
         // testing it here would suppress every decision.
         if (ReplayEngine.HasPendingCommand) return;
+
+        // A step is spent only once a decision will actually run.
+        _stepOnce = false;
 
         RunDecision();
     }
@@ -399,9 +448,19 @@ public static class BotController
     private static void OnHeartbeat()
     {
         if (!_running) return;
-        StuckRecovery.Tick();
+
+        // A paused run must not look like a stalled one. StuckRecovery counts no-progress time,
+        // so ticking it through a deliberate pause would fire recovery while the user is just
+        // inspecting the board.
+        if (!IsGated())
+            StuckRecovery.Tick();
+
         OnInputRequired();
-        ScheduleHeartbeat();   // re-arm only while running, so the chain stops with the run
+
+        // Re-arm ALWAYS, including while paused — this is the only level-triggered path back into
+        // the loop (ReplayDispatcher's InputRequired signal is edge-triggered), so skipping the
+        // re-arm while paused would mean unpausing never resumes.
+        ScheduleHeartbeat();
     }
 
     // ── Decision loop ────────────────────────────────────────────────────────────────────
