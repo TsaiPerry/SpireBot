@@ -34,6 +34,10 @@ public static class RunContinueAttach
     /// the advice would be confidently wrong rather than absent.</summary>
     private const string SupportedCharacter = "IRONCLAD";
 
+    /// <summary>The ascension the policy was trained at, and the one <see cref="BotController.StartBotRun"/>
+    /// hard-codes for the runs it starts itself.</summary>
+    private const int SupportedAscension = 0;
+
     private static bool _armed;
     private static string _pendingSeed = "";
 
@@ -90,6 +94,17 @@ public static class RunContinueAttach
             GD.Print($"[SpireBot] RunContinueAttach: resumed run is character " +
                      $"'{character ?? "unknown"}', not {SupportedCharacter} — not attaching, " +
                      $"because the policy's action space and observations are {SupportedCharacter}'s.");
+            return false;
+        }
+
+        // Same reasoning as the character check, and the same value StartBotRun hard-codes for
+        // the runs it starts: the policy was trained at ascension 0, and the ascension modifiers
+        // change the rules the advice is reasoning about.
+        if (save.Ascension != SupportedAscension)
+        {
+            GD.Print($"[SpireBot] RunContinueAttach: resumed run is ascension {save.Ascension}, " +
+                     $"not {SupportedAscension} — not attaching, because the policy was trained " +
+                     $"at ascension {SupportedAscension}.");
             return false;
         }
 
