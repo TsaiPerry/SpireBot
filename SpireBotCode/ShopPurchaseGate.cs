@@ -55,12 +55,19 @@ namespace SpireBot.SpireBotCode;
 internal static class ShopPurchaseGate
 {
     /// <summary>
-    /// Give-up window. Every path through <c>OnTryPurchaseWrapper</c> should end in
-    /// <c>InvokePurchaseCompleted</c> or <c>InvokePurchaseFailed</c>, so the flag should always
-    /// clear — but a purchase that somehow returned false without invoking either would leave it
-    /// set, and waiting on it forever would wedge the bot in the shop for the rest of the run.
-    /// Generous relative to a purchase's real cost (card-add plus gold-loss animations) so it is
-    /// a backstop, not the usual exit.
+    /// Give-up window, after which the flag is force-cleared (see <see cref="IsSettling"/>).
+    ///
+    /// The flag genuinely does leak. <c>MerchantCardRemovalEntry</c> overrides
+    /// <c>OnTryPurchaseWrapper</c> with its own version that invokes NEITHER
+    /// <c>InvokePurchaseCompleted</c> nor <c>InvokePurchaseFailed</c> when its purchase returns
+    /// false (MerchantCardRemovalEntry.cs:35-49) — and its inner <c>OnTryPurchase</c> returns
+    /// false both when the slot is already <c>Used</c> and, routinely, when the player cancels
+    /// the card-removal screen (:56-69, the call is <c>cancelable: true</c>). The vendored
+    /// record patch only clears the flag from the two Invoke prefixes
+    /// (Replay/Patches/Record/ShopRecordPatch.cs:103-128), so on those paths it stays set.
+    ///
+    /// Generous relative to a purchase's real cost (card-add plus gold-loss animations) so this
+    /// is a backstop, not the usual exit.
     /// </summary>
     private const ulong TimeoutMs = 3000;
 
@@ -70,14 +77,14 @@ internal static class ShopPurchaseGate
 
     private static bool _holding;
     private static ulong _startedTick;
-    private static bool _gaveUp;
 
     /// <summary>
     /// True while a purchase is in flight. Read by <see cref="BotController.OnInputRequired"/>,
     /// which declines to decide while it holds.
     ///
-    /// Not a pure property: it latches the start of a purchase and the give-up decision. It is
-    /// read exactly once per <see cref="BotController.OnInputRequired"/> cycle.
+    /// Not a pure property: it latches when the current purchase started, and on timeout it
+    /// force-clears the leaked flag. It is read exactly once per
+    /// <see cref="BotController.OnInputRequired"/> cycle.
     /// </summary>
     internal static bool IsSettling
     {
@@ -87,28 +94,29 @@ internal static class ShopPurchaseGate
             {
                 // Purchase finished (or none was running). Rearm for the next one.
                 _holding = false;
-                _gaveUp = false;
                 return false;
             }
 
             if (!_holding)
             {
                 _holding = true;
-                _gaveUp = false;
                 _startedTick = Time.GetTicksMsec();
             }
 
-            // Already gave up on THIS purchase — stay released until the flag clears, so a stuck
-            // flag costs one timeout rather than blocking every decision from here on.
-            if (_gaveUp)
-                return false;
-
             if (Time.GetTicksMsec() - _startedTick >= TimeoutMs)
             {
-                _gaveUp = true;
+                // Force-clear rather than just releasing our own latch. On the leaking paths the
+                // flag NEVER clears by itself, and a gate that merely stopped holding would stay
+                // permanently disabled for the rest of the run — every later purchase unguarded,
+                // which is the crash this class exists to prevent. Clearing it is what
+                // InvokePurchaseFailed's own prefix does; PendingLabel is deliberately left alone
+                // so the vendored record patches' log bookkeeping is untouched.
+                ShopPurchaseState.IsPurchasing = false;
+                _holding = false;
                 GD.PrintErr($"[SpireBot] ShopPurchaseGate: a shop purchase has been in flight for " +
-                            $"{TimeoutMs}ms without completing or failing — releasing the loop so " +
-                            $"the run can continue. The bot will re-decide from the current screen.");
+                            $"{TimeoutMs}ms without completing or failing — clearing the flag and " +
+                            $"releasing the loop. Expected after a cancelled card removal; the bot " +
+                            $"will re-decide from the current screen.");
                 return false;
             }
 
@@ -118,9 +126,5 @@ internal static class ShopPurchaseGate
 
     /// <summary>Drops any pending wait. Called from <see cref="BotController"/> on run start and
     /// on stop, so a purchase in flight when one run ends can never hold the next one.</summary>
-    internal static void Reset()
-    {
-        _holding = false;
-        _gaveUp = false;
-    }
+    internal static void Reset() => _holding = false;
 }

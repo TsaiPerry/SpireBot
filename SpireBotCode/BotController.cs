@@ -410,6 +410,7 @@ public static class BotController
         RewardClaimMemory.Reset();
         ScreenExitMemory.Reset();
         ShopPurchaseGate.Reset();
+        _recheckPending = false;
         _session.ResetRun();
         _obsBuilder = new ObsBuilder(_contract!, _session);
         DecisionDumper.ResetRun(seed);
