@@ -600,6 +600,11 @@ public static class BotController
 
     private static void OnInputRequired()
     {
+        // Cleared unconditionally at entry: whether this cycle was woken by the re-check timer or
+        // by anything else, no timer is outstanding once we are here, and the gate check below
+        // schedules a fresh one if it still holds.
+        _recheckPending = false;
+
         if (!_running) return;
 
         // Skip pulses fired while our own dispatched command is still in flight — those are
@@ -663,12 +668,23 @@ public static class BotController
     /// </summary>
     private static void ScheduleRecheck()
     {
+        // One outstanding re-check at a time. Several things re-enter OnInputRequired during a
+        // hold (the dispatcher's own poll, dispatchable-set changes, the heartbeat), and without
+        // this each would stack another timer for the same wait.
+        if (_recheckPending) return;
+
         var tree = NGame.Instance?.GetTree();
         // No tree means the heartbeat cannot have been scheduled either; the gate still releases
         // on its own timeout, so this degrades to heartbeat pace rather than stalling.
-        tree?.CreateTimer(ShopPurchaseGate.RecheckSeconds)
+        if (tree == null) return;
+
+        _recheckPending = true;
+        tree.CreateTimer(ShopPurchaseGate.RecheckSeconds)
             .Connect("timeout", Callable.From(OnInputRequired));
     }
+
+    /// <summary>Whether a <see cref="ScheduleRecheck"/> timer is already outstanding.</summary>
+    private static bool _recheckPending;
 
     private static void OnHeartbeat()
     {

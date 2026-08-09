@@ -1,11 +1,6 @@
-using System.Linq;
-
 using Godot;
 
-using MegaCrit.Sts2.Core.Entities.Merchant;
-
-using SpireBot.Replay;
-using SpireBot.Replay.Commands;
+using SpireBot.Replay.Patches.Record;
 
 namespace SpireBot.SpireBotCode;
 
@@ -18,14 +13,14 @@ namespace SpireBot.SpireBotCode;
 /// next line (Replay/Commands/ShopCommands.cs:216-218 and the equivalents). <c>InvokePurchase</c>
 /// fire-and-forgets the <c>Task</c> the game hands back, so "Ok" means "the purchase was
 /// started", not "the purchase finished". Ok drains the command from the pending queue, and
-/// <c>ReplayEngine.HasPendingCommand</c> — the only thing that stops
+/// <c>ReplayEngine.HasPendingCommand</c> — the only thing that stopped
 /// <c>BotController.OnInputRequired</c> from deciding again — immediately goes false.
 ///
 /// The game removes a purchased item from the shelf in <c>MerchantEntry.ClearAfterPurchase</c>,
-/// which runs only AFTER the awaited <c>OnTryPurchase</c> completes
-/// (MerchantEntry.cs:81-89 in the decompiled source). So in the window between those two
-/// moments the item is still stocked and the gold is still unspent, and the bot happily buys it
-/// again — and again. That is the "buys everything too quickly" symptom.
+/// which runs only AFTER the awaited <c>OnTryPurchase</c> completes (MerchantEntry.cs:81-89 in
+/// the decompiled source). So in the window between those two moments the item is still stocked
+/// and the gold still unspent, and the bot happily buys it again — and again. That is the "buys
+/// everything too quickly" symptom.
 ///
 /// It also crashes the game. <c>OnTryPurchaseWrapper</c> checks <c>IsStocked</c> synchronously
 /// and then awaits; <c>MerchantCardEntry.OnTryPurchase</c> dereferences <c>CreationResult.Card</c>
@@ -33,22 +28,39 @@ namespace SpireBot.SpireBotCode;
 /// <c>ClearAfterPurchase</c> sets <c>CreationResult</c> to null — a NullReferenceException
 /// resumed on the main thread mid-await.
 ///
-/// ── Why the fix lives here ────────────────────────────────────────────────────────────────
-/// The natural fix is the wait that sibling command <c>BuyCardRemovalCommand</c> already
-/// performs — it returns <c>ExecuteResult.Retry(200)</c> until the selection screen actually
-/// appears (ShopCommands.cs:406-408). But ShopCommands.cs is VENDORED from the RunReplays mod
-/// and must not be edited, so the same condition-based wait is applied from outside instead:
-/// after dispatching a purchase, the loop refuses to decide until the shop's stocked-entry set
-/// actually changes.
+/// ── Why the fix lives here, and what it keys off ──────────────────────────────────────────
+/// The natural fix is the wait sibling command <c>BuyCardRemovalCommand</c> already performs —
+/// it returns <c>ExecuteResult.Retry(200)</c> until the selection screen appears
+/// (ShopCommands.cs:406-408). But ShopCommands.cs is VENDORED from the RunReplays mod and must
+/// not be edited, so the wait is applied from outside instead.
+///
+/// The signal is <see cref="ShopPurchaseState.IsPurchasing"/>, which the vendored record patches
+/// already maintain as a true purchase-lifecycle flag: set in the prefix of
+/// <c>MerchantEntry.OnTryPurchaseWrapper</c> and cleared in the prefixes of
+/// <c>InvokePurchaseCompleted</c> and <c>InvokePurchaseFailed</c>
+/// (Replay/Patches/Record/ShopRecordPatch.cs:60-128). Nothing else read it on the dispatch side
+/// until now.
+///
+/// Keying off the lifecycle rather than off the shop's stock is what makes this correct in the
+/// cases stock-watching gets wrong: a fake-merchant purchase (which is not in
+/// <c>ActiveMerchantRoom</c> at all), a Courier-style restock (which refills the slot, so the
+/// shelf count never drops), and a Buy command whose target entry has already gone (which
+/// invokes no purchase, so this never arms).
+///
+/// There is no gap between the command reporting Ok and this flag going true. Harmony's prefix
+/// on <c>OnTryPurchaseWrapper</c> runs synchronously at method entry, inside
+/// <c>InvokePurchase</c>'s reflective call, inside <c>cmd.Execute()</c> — all before
+/// <c>ExecuteNext</c> consumes the command and lets <c>HasPendingCommand</c> go false.
 /// </summary>
 internal static class ShopPurchaseGate
 {
     /// <summary>
-    /// Give-up window. A purchase the game refuses (not enough gold, no room in the deck) never
-    /// changes the shelf, so waiting on it forever would wedge the bot in the shop for the rest
-    /// of the run. Releasing instead lets the loop re-decide, and the ordinary stuck guard
-    /// handles a decision that then genuinely repeats. Generous relative to a purchase's real
-    /// cost (card-add plus gold-loss animations) so it is a backstop, not the usual exit.
+    /// Give-up window. Every path through <c>OnTryPurchaseWrapper</c> should end in
+    /// <c>InvokePurchaseCompleted</c> or <c>InvokePurchaseFailed</c>, so the flag should always
+    /// clear — but a purchase that somehow returned false without invoking either would leave it
+    /// set, and waiting on it forever would wedge the bot in the shop for the rest of the run.
+    /// Generous relative to a purchase's real cost (card-add plus gold-loss animations) so it is
+    /// a backstop, not the usual exit.
     /// </summary>
     private const ulong TimeoutMs = 3000;
 
@@ -56,35 +68,47 @@ internal static class ShopPurchaseGate
     /// that shopping stays brisk — the 1 Hz heartbeat alone would cost a second per item.</summary>
     internal const double RecheckSeconds = 0.15;
 
-    private static bool _waiting;
+    private static bool _holding;
     private static ulong _startedTick;
-    private static int _stockedAtDispatch;
-    private static string _what = "";
+    private static bool _gaveUp;
 
-    /// <summary>True while a dispatched purchase has not yet visibly resolved. Read by
-    /// <see cref="BotController.OnInputRequired"/>, which declines to decide while it holds.</summary>
+    /// <summary>
+    /// True while a purchase is in flight. Read by <see cref="BotController.OnInputRequired"/>,
+    /// which declines to decide while it holds.
+    ///
+    /// Not a pure property: it latches the start of a purchase and the give-up decision. It is
+    /// read exactly once per <see cref="BotController.OnInputRequired"/> cycle.
+    /// </summary>
     internal static bool IsSettling
     {
         get
         {
-            if (!_waiting)
-                return false;
-
-            // The shelf changed: the purchase landed (or the shop closed under us). Either way
-            // the state the next decision reads is now the post-purchase state.
-            int stocked = CountStocked();
-            if (stocked != _stockedAtDispatch)
+            if (!ShopPurchaseState.IsPurchasing)
             {
-                Release($"'{_what}' settled");
+                // Purchase finished (or none was running). Rearm for the next one.
+                _holding = false;
+                _gaveUp = false;
                 return false;
             }
 
+            if (!_holding)
+            {
+                _holding = true;
+                _gaveUp = false;
+                _startedTick = Time.GetTicksMsec();
+            }
+
+            // Already gave up on THIS purchase — stay released until the flag clears, so a stuck
+            // flag costs one timeout rather than blocking every decision from here on.
+            if (_gaveUp)
+                return false;
+
             if (Time.GetTicksMsec() - _startedTick >= TimeoutMs)
             {
-                GD.PrintErr($"[SpireBot] ShopPurchaseGate: '{_what}' did not change the shop's " +
-                            $"stock within {TimeoutMs}ms — releasing the loop. The purchase was " +
-                            $"most likely refused (gold or space); the bot will re-decide.");
-                Release(null);
+                _gaveUp = true;
+                GD.PrintErr($"[SpireBot] ShopPurchaseGate: a shop purchase has been in flight for " +
+                            $"{TimeoutMs}ms without completing or failing — releasing the loop so " +
+                            $"the run can continue. The bot will re-decide from the current screen.");
                 return false;
             }
 
@@ -92,53 +116,11 @@ internal static class ShopPurchaseGate
         }
     }
 
-    /// <summary>
-    /// Arms the gate if <paramref name="cmd"/> is a purchase that resolves asynchronously.
-    /// Called from <see cref="ActionExecutor.Execute"/> for every dispatched command.
-    ///
-    /// <c>BuyCardRemovalCommand</c> is deliberately NOT gated: it already waits internally for
-    /// the card-selection screen, and its purchase is complete by the time it reports Ok.
-    /// </summary>
-    internal static void Record(ReplayCommand cmd)
+    /// <summary>Drops any pending wait. Called from <see cref="BotController"/> on run start and
+    /// on stop, so a purchase in flight when one run ends can never hold the next one.</summary>
+    internal static void Reset()
     {
-        if (cmd is not (BuyCardCommand or BuyRelicCommand or BuyPotionCommand))
-            return;
-
-        _waiting = true;
-        _startedTick = Time.GetTicksMsec();
-        _stockedAtDispatch = CountStocked();
-        _what = cmd.Describe();
-    }
-
-    /// <summary>Drops any pending wait. Called on run start/stop through
-    /// <see cref="Reset"/> so a gate armed in one run can never hold the next one.</summary>
-    internal static void Reset() => Release(null);
-
-    private static void Release(string? settled)
-    {
-        if (_waiting && settled != null)
-            GD.Print($"[SpireBot] ShopPurchaseGate: {settled}.");
-        _waiting = false;
-        _what = "";
-    }
-
-    /// <summary>
-    /// How many items the shop currently has on its shelves. Counting rather than tracking the
-    /// specific entry keeps this independent of which Buy command was dispatched — a purchase
-    /// removes exactly one entry, and a restock (Hook.ShouldRefillMerchantEntry) replaces it,
-    /// which also changes the count for at least one frame. Zero when no shop is open, which is
-    /// itself a change from any in-shop count and so releases the gate.
-    /// </summary>
-    private static int CountStocked()
-    {
-        var room = ReplayState.ActiveMerchantRoom;
-        if (room == null || !GodotObject.IsInstanceValid(room) || !room.IsInsideTree())
-            return 0;
-
-        var entries = OpenShopCommand.GetEntries(room);
-        if (entries == null)
-            return 0;
-
-        return entries.Count(e => e.IsStocked);
+        _holding = false;
+        _gaveUp = false;
     }
 }

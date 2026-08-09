@@ -81,9 +81,6 @@ public static class ActionExecutor
         RoomOneShots.Record(cmd);
         RewardClaimMemory.Record(cmd);
         ScreenExitMemory.Record(cmd, kind);
-        // Must precede the enqueue: the gate snapshots the shop's stock as it stands BEFORE the
-        // purchase runs, and DispatchNow below can execute the command synchronously.
-        ShopPurchaseGate.Record(cmd);
         ReplayEngine._pending.Enqueue(cmd);
         LastEnqueuedTick = Time.GetTicksMsec();
         ReplayDispatcher.DispatchNow();
