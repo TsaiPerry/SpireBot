@@ -409,6 +409,7 @@ public static class BotController
         RoomOneShots.Reset();
         RewardClaimMemory.Reset();
         ScreenExitMemory.Reset();
+        ShopPurchaseGate.Reset();
         _session.ResetRun();
         _obsBuilder = new ObsBuilder(_contract!, _session);
         DecisionDumper.ResetRun(seed);
@@ -428,6 +429,8 @@ public static class BotController
         _running = false;
         ReplayEngine.BotDriving = false;
         Paused = false;
+        // A purchase in flight when the loop stops must not hold the next run's first decision.
+        ShopPurchaseGate.Reset();
         // BotDriving going false makes ReplayEngine.IsActive false, after which nothing re-asserts
         // OR resets Engine.TimeScale — without this the game is left running at whatever
         // multiplier the bot used, with no way back short of a restart.
@@ -606,6 +609,18 @@ public static class BotController
         // so a step armed mid-flight survives to the next cycle instead of being silently spent.
         if (ReplayEngine.HasPendingCommand) return;
 
+        // A dispatched shop purchase reports Ok as soon as it is STARTED, so the pending-command
+        // check above goes false while the game is still resolving it — during which the item is
+        // still on the shelf and the gold still unspent. Deciding in that window bought the same
+        // item repeatedly and crashed the game on a null CreationResult; see ShopPurchaseGate.
+        // Re-checked on a short timer rather than only on the 1 Hz heartbeat, so a shop trip
+        // doesn't cost a second per item.
+        if (ShopPurchaseGate.IsSettling)
+        {
+            ScheduleRecheck();
+            return;
+        }
+
         // The gate CLASSIFIES rather than returns (paused-action-preview spec): paused with no
         // step armed means this cycle decides but HOLDS its result (Dispatch caches it) instead
         // of executing. _previewing must be computed before _stepOnce is cleared below, because
@@ -637,6 +652,22 @@ public static class BotController
         }
 
         tree.CreateTimer(HeartbeatSeconds).Connect("timeout", Callable.From(OnHeartbeat));
+    }
+
+    /// <summary>
+    /// Re-enters the loop sooner than the next heartbeat would. Used only while
+    /// <see cref="ShopPurchaseGate"/> holds: that wait normally ends in a few hundred
+    /// milliseconds, and falling back to the 1 Hz heartbeat would stretch a five-item shop trip
+    /// into five seconds of visible idling. Safe to stack — <see cref="OnInputRequired"/> is
+    /// idempotent, and each timer fires once.
+    /// </summary>
+    private static void ScheduleRecheck()
+    {
+        var tree = NGame.Instance?.GetTree();
+        // No tree means the heartbeat cannot have been scheduled either; the gate still releases
+        // on its own timeout, so this degrades to heartbeat pace rather than stalling.
+        tree?.CreateTimer(ShopPurchaseGate.RecheckSeconds)
+            .Connect("timeout", Callable.From(OnInputRequired));
     }
 
     private static void OnHeartbeat()
