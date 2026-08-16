@@ -33,9 +33,22 @@ public class SpireBotConfig : SimpleModConfig
     /// Engine time scale during a bot run. The vendored dispatcher fast-forwards playback at
     /// 2.0 and re-asserts that whenever a driver is attached, so this is pinned at run start;
     /// raise it to grind runs faster.
+    ///
+    /// This is the *selected* speed and the persisted one. The overlay's ◀/▶ buttons
+    /// (BotControlBar) write it live and save it debounced, so a change made mid-run survives to
+    /// the next run and the next session. Range and step must keep covering every
+    /// SpeedLadder.Steps rung — BotControlSelfTest asserts that.
     /// </summary>
-    [ConfigSlider(0.5, 4, 0.5)]
+    [ConfigSlider(0.5, 5, 0.5)]
     public static float GameSpeed { get; set; } = 1.0f;
+
+    /// <summary>
+    /// When true (the default), a bot run begins paused: the bot never acts on its own, and the
+    /// overlay shows the action it would take, so a human can play the run manually with the
+    /// policy as an advisor. Press Play on the overlay to hand the run over to the bot at any
+    /// point. Turn this off for autonomous grind runs, which should start driving immediately.
+    /// </summary>
+    public static bool StartPaused { get; set; } = true;
 
     /// <summary>
     /// Runs the contract self-test at startup and the per-decision observation self-check.

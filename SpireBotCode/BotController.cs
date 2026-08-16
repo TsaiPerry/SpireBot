@@ -56,6 +56,164 @@ public static class BotController
     /// <summary>True while the bot decision loop is driving a run (StartBotRun..Stop).
     /// MenuInjection uses this to stop an abandoned bot run when the main menu is reached.</summary>
     public static bool IsRunning => _running;
+
+    private static bool _paused;
+    private static bool _stepOnce;
+
+    /// <summary>
+    /// True while the decision loop is held by the overlay's pause control (BotControlBar).
+    /// A paused bot stops *choosing* actions; a command already dispatched still runs to
+    /// completion, because the bot enqueues into the vendored dispatcher rather than acting
+    /// directly. Reset at every <see cref="StartBotRun"/> and <see cref="Stop"/>.
+    /// </summary>
+    public static bool Paused
+    {
+        get => _paused;
+        set
+        {
+            _paused = value;
+            if (!value)
+            {
+                // Leaving pause discards an un-consumed step, so pausing again later doesn't
+                // hand out a free decision the user never asked for — and discards any held
+                // preview, so it can never fire unattended after the user resumes.
+                _stepOnce = false;
+                _pending = null;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Pushes the multiplier the game should actually be running at right now: the user's
+    /// selected speed (<see cref="SpireBotConfig.GameSpeed"/>) while the bot is deciding, 1.0
+    /// while paused so the board can be read at normal speed — and so a run that starts paused
+    /// for manual play does not run the game at grind speed.
+    ///
+    /// This MUST go through ReplayDispatcher.GameSpeed rather than assigning Engine.TimeScale
+    /// directly. The vendored ExecuteNext re-asserts TimeScale from its own _gameSpeed field on
+    /// every dispatch (Replay/ReplayDispatcher.cs:1112-1114), above its own paused check.
+    /// RunReplays can assign TimeScale directly on pause only because its pause also
+    /// short-circuits TryDispatch (Replay/ReplayDispatcher.cs:1046) so ExecuteNext never runs;
+    /// SpireBot's pause deliberately leaves that path running, so a direct assignment here would
+    /// be stomped back to the fast value within a frame.
+    /// </summary>
+    public static void ApplyEffectiveSpeed()
+    {
+        ReplayDispatcher.GameSpeed = Paused ? 1.0f : SpireBotConfig.GameSpeed;
+    }
+
+    /// <summary>With a previewed action held: commit exactly that action, staying paused (the
+    /// next heartbeat previews the following one). With nothing held (Step pressed before the
+    /// first preview computed, or on a screen where the loop selected nothing): fall back to
+    /// arming one full decision, today's pre-preview behavior — the button is never dead.
+    /// Implies <see cref="Paused"/> either way.</summary>
+    public static void StepOnce()
+    {
+        _paused = true;
+
+        var held = _pending;
+        if (held != null)
+        {
+            _pending = null;   // cleared BEFORE executing, so a throw can never double-commit
+            Commit(held);
+            return;
+        }
+
+        _stepOnce = true;
+    }
+
+    /// <summary>Executes a held preview: deferred commit gate, deferred decision dump, then the
+    /// exact held command. Deliberately does NOT run <see cref="AdvanceStuckGuard"/> — its
+    /// forced-fallback path chooses a different command than the one held, which would break
+    /// the guarantee that Step performs what the overlay showed. A human stepping deliberately
+    /// is the situation the automatic guard exists to substitute for.</summary>
+    private static void Commit(PendingAction held)
+    {
+        // Defensive: the gate's counter only mutates on commits and unpaused dispatches, so it
+        // cannot have changed since the probe selected this command — but honor a refusal
+        // anyway, matching the unpaused forced-decline path (which also executes nothing).
+        if (held.CommitGate != null && !held.CommitGate())
+        {
+            GD.PrintErr($"[SpireBot] BotController.Commit: commit gate refused " +
+                        $"'{held.Cmd.Describe()}' — discarding the preview; the next cycle re-decides.");
+            return;
+        }
+
+        // Deferred from the preview cycle so dumps record only actions actually taken.
+        if (held.Result != null && held.Obs != null && held.Map != null)
+            DecisionDumper.Write(held.Ctx, held.Obs, held.Map, held.Result);
+
+        try
+        {
+            ActionExecutor.Execute(held.Cmd, held.Kind);
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[SpireBot] BotController.Commit: ActionExecutor.Execute threw for " +
+                        $"{held.Cmd.GetType().Name} — the run will wait for the next settle signal: {ex}");
+        }
+    }
+
+    /// <summary>
+    /// The single seam between "the loop chose a command" and "the game performs it". All six
+    /// execution sites route here. Previewing: hold the command (and log the refresh — the
+    /// evidence, per the spec's verification section, that inference is state-driven rather
+    /// than timer-driven). Normal: execute immediately, exactly as before this feature.
+    /// </summary>
+    private static void Dispatch(
+        ReplayCommand cmd, DecisionKind kind, DecisionContext ctx,
+        ActionMap? map, ObsResult? obs, PolicyResult? result, Func<bool>? commitGate = null)
+    {
+        if (_previewing)
+        {
+            _pending = new PendingAction(cmd, kind, ctx, map, obs, result,
+                                         BuildDecisionKey(ctx), commitGate);
+            GD.Print($"[SpireBot] BotController: preview refreshed: {cmd.Describe()}");
+            return;
+        }
+
+        // Non-preview: selection-time side effects (TryBeginAutoAdvance) already ran inline at
+        // the call site, and the dump already ran in DispatchWithFallback — commitGate unused.
+        ActionExecutor.Execute(cmd, kind);
+    }
+
+    /// <summary>The single definition of "the decision loop is currently held", used by both
+    /// <see cref="OnHeartbeat"/> and <see cref="OnInputRequired"/> so the two can never disagree.</summary>
+    private static bool IsGated() => _paused && !_stepOnce;
+
+    // ── Paused action preview (paused-action-preview spec) ─────────────────────────────────
+    //
+    // While paused, the loop still decides, but the chosen command is HELD here instead of
+    // executing; Step commits exactly this instance (the WYSIWYG guarantee — with Temperature
+    // above 0 a re-decide would resample and could act differently than it showed). Refreshed
+    // only when BuildDecisionKey changes (Component 1a); cleared on unpause (Paused setter),
+    // hence also on StartBotRun/Stop which set Paused = false, and on every commit.
+    //
+    // Map is nullable because TryAutoAdvance has no ActionMap in scope; the deferred dump
+    // needs Result non-null, and the only path that supplies Result supplies Map/Obs too.
+    // CommitGate defers the card-claim branch's TryBeginAutoAdvance — the one selection-time
+    // side effect that lives upstream of ActionExecutor.Execute (see the spec's "Where the
+    // hold goes" for why previewing must not run it, and why probe and gate cannot disagree).
+    private sealed record PendingAction(
+        ReplayCommand Cmd, DecisionKind Kind,
+        DecisionContext Ctx, ActionMap? Map, ObsResult? Obs, PolicyResult? Result,
+        string Key, Func<bool>? CommitGate);
+
+    private static PendingAction? _pending;
+
+    /// <summary>True while the current RunDecision cycle is a preview — it must hold its
+    /// chosen command rather than execute it. Recomputed at every OnInputRequired entry.</summary>
+    private static bool _previewing;
+
+    /// <summary>True while a previewed action is held awaiting Step.</summary>
+    public static bool HasPendingPreview => _pending != null;
+
+    /// <summary>The held action's description for the overlay, or null when nothing is held.</summary>
+    public static string? PendingPreviewDescription => _pending?.Cmd.Describe();
+
+    /// <summary>Self-test seam (BotControlSelfTest): whether a single-step is armed.</summary>
+    internal static bool StepArmed => _stepOnce;
+
     private static bool _subscribed;
     private static Contract? _contract;
     private static Callable _inputRequiredHandler;
@@ -119,11 +277,8 @@ public static class BotController
             return;
         }
 
-        if (!TryLoadContract())
+        if (!PrepareDriver())
             return;
-
-        SelectPolicy();
-        ThinkingOverlay.Ensure();
 
         if (NGame.Instance == null)
         {
@@ -144,32 +299,7 @@ public static class BotController
             return;
         }
 
-        _running = true;
-        // Tells the vendored replay-side patches/screen captures that a driver is attached, so
-        // they populate ReplayState — without this the dispatcher enumerates nothing and the
-        // bot stalls on its first decision (see ReplayEngine.BotDriving).
-        ReplayEngine.BotDriving = true;
-        // The vendored dispatcher fast-forwards a replay (_gameSpeed defaults to 2.0) and
-        // re-asserts it whenever IsActive is true, which BotDriving now makes permanent. Pin it
-        // to the configured speed so a bot run doesn't silently double-speed the game.
-        ReplayDispatcher.GameSpeed = SpireBotConfig.GameSpeed;
-        _lastDecisionKey = null;
-        _repeatCount = 0;
-        StallDiagnostics.Reset();
-        StuckRecovery.Reset();
-        RoomOneShots.Reset();
-        RewardClaimMemory.Reset();
-        ScreenExitMemory.Reset();
-        _session.ResetRun();
-        _obsBuilder = new ObsBuilder(_contract!, _session);
-        DecisionDumper.ResetRun(seed);
-        SubscribeCombatHooks();
-
-        // Idempotent — subscribes ReplayDispatcher.OnRoomExited so ReplayState.ActiveMerchantRoom
-        // (and other pending screen refs) actually gets cleared on room exit. Without this call,
-        // nothing ever invokes ReplayDispatcher.Reset() and the subscription never happens
-        // (round 3 fix — see VENDORED-FROM.md delta 9).
-        ReplayDispatcher.Reset();
+        BeginDriving(seed, SpireBotConfig.StartPaused);
 
         GD.Print($"[SpireBot] BotController.StartBotRun — character={character.Id} " +
                  $"seed='{seed}' ascension=0");
@@ -193,12 +323,119 @@ public static class BotController
         Subscribe();
     }
 
+    /// <summary>
+    /// Attaches the decision loop to a run that is ALREADY in progress — one the player resumed
+    /// with the game's own Continue button (see <see cref="RunContinueAttach"/>) rather than one
+    /// this class started. Always attaches PAUSED: the bot advises, the human plays, and Play
+    /// hands the run over whenever they want it to.
+    ///
+    /// Everything <see cref="StartBotRun"/> does per run happens here too, minus the parts that
+    /// only make sense for a brand-new run — resolving the character, the transition sfx, and
+    /// the <c>StartNewSingleplayerRun</c> call itself. One consequence of attaching mid-run is
+    /// that <see cref="SessionState"/> starts empty, so the ACCUMULATE-shaped observation
+    /// features (enemy intent history in particular) are blank until the current combat has run
+    /// a turn or two. The advice is still well-formed, just slightly less informed on the first
+    /// combat after attaching.
+    /// </summary>
+    /// <param name="seed">The resumed run's seed, used only to name the decision-dump directory.</param>
+    public static void AttachToRun(string seed)
+    {
+        if (_running)
+        {
+            GD.Print("[SpireBot] BotController.AttachToRun called while already running — ignoring.");
+            return;
+        }
+
+        if (!PrepareDriver())
+            return;
+
+        // startPaused is hard-coded rather than read from config: this entry point exists to
+        // advise a human who is playing, so taking over their resumed run unannounced would be
+        // the one behavior nobody asked for. SpireBotConfig.StartPaused gates whether we attach
+        // at all (RunContinueAttach), not whether we then drive.
+        BeginDriving(seed, startPaused: true);
+
+        GD.Print($"[SpireBot] BotController.AttachToRun — advising the in-progress run " +
+                 $"seed='{seed}' (paused; press Play to hand it over).");
+
+        Subscribe();
+    }
+
+    /// <summary>Loads the contract, picks the policy, and makes sure the overlay exists — the
+    /// setup both entry points need before any per-run state is touched. False means the
+    /// contract failed to load and the caller must abort without having changed anything.</summary>
+    private static bool PrepareDriver()
+    {
+        if (!TryLoadContract())
+            return false;
+
+        SelectPolicy();
+        ThinkingOverlay.Ensure();
+        return true;
+    }
+
+    /// <summary>
+    /// Per-run state reset shared by <see cref="StartBotRun"/> and <see cref="AttachToRun"/>:
+    /// marks the driver attached, applies the starting pause and speed, and clears every piece
+    /// of run-scoped memory. Callers still own their own <see cref="Subscribe"/> call, because
+    /// StartBotRun must subscribe only after it has kicked off the new run.
+    /// </summary>
+    private static void BeginDriving(string seed, bool startPaused)
+    {
+        _running = true;
+        // Tells the vendored replay-side patches/screen captures that a driver is attached, so
+        // they populate ReplayState — without this the dispatcher enumerates nothing and the
+        // bot stalls on its first decision (see ReplayEngine.BotDriving).
+        ReplayEngine.BotDriving = true;
+        // A pause left over from a previous run must not silently hold the new one, and a step
+        // or preview held when the last run ended must not survive into this one. The Paused
+        // setter discards both only on the FALSE transition, so assigning startPaused directly
+        // could carry a stale preview across runs — where Step would then commit a command
+        // chosen against a board that no longer exists. Clear first, then apply the requested
+        // starting state. The two assignments are the reset; neither is redundant.
+        Paused = false;
+        Paused = startPaused;
+
+        // The vendored dispatcher fast-forwards a replay (_gameSpeed defaults to 2.0) and
+        // re-asserts it whenever IsActive is true, which BotDriving now makes permanent. Pin it
+        // so a bot run doesn't silently double-speed the game — and so a run that starts paused
+        // for manual play runs at 1.0x. Must follow the pause assignment above: the effective
+        // speed depends on it.
+        ApplyEffectiveSpeed();
+        _lastDecisionKey = null;
+        _repeatCount = 0;
+        StallDiagnostics.Reset();
+        StuckRecovery.Reset();
+        RoomOneShots.Reset();
+        RewardClaimMemory.Reset();
+        ScreenExitMemory.Reset();
+        ShopPurchaseGate.Reset();
+        _recheckPending = false;
+        _session.ResetRun();
+        _obsBuilder = new ObsBuilder(_contract!, _session);
+        DecisionDumper.ResetRun(seed);
+        SubscribeCombatHooks();
+
+        // Idempotent — subscribes ReplayDispatcher.OnRoomExited so ReplayState.ActiveMerchantRoom
+        // (and other pending screen refs) actually gets cleared on room exit. Without this call,
+        // nothing ever invokes ReplayDispatcher.Reset() and the subscription never happens
+        // (round 3 fix — see VENDORED-FROM.md delta 9).
+        ReplayDispatcher.Reset();
+    }
+
     /// <summary>Stops the bot decision loop. Does not end the in-progress run — it just stops
     /// driving it; the player (or another BotController.StartBotRun call) can take over.</summary>
     public static void Stop()
     {
         _running = false;
         ReplayEngine.BotDriving = false;
+        Paused = false;
+        // A purchase in flight when the loop stops must not hold the next run's first decision.
+        ShopPurchaseGate.Reset();
+        // BotDriving going false makes ReplayEngine.IsActive false, after which nothing re-asserts
+        // OR resets Engine.TimeScale — without this the game is left running at whatever
+        // multiplier the bot used, with no way back short of a restart.
+        ReplayDispatcher.RestoreGameSpeed();
         Unsubscribe();
         UnsubscribeCombatHooks();
         GD.Print("[SpireBot] BotController.Stop — decision loop stopped.");
@@ -364,13 +601,40 @@ public static class BotController
 
     private static void OnInputRequired()
     {
+        // Cleared unconditionally at entry: whether this cycle was woken by the re-check timer or
+        // by anything else, no timer is outstanding once we are here, and the gate check below
+        // schedules a fresh one if it still holds.
+        _recheckPending = false;
+
         if (!_running) return;
 
         // Skip pulses fired while our own dispatched command is still in flight — those are
         // that dispatch's bookkeeping, not a new decision. Deliberately NOT ReplayEngine
         // .IsActive: that is now true for the whole bot run (ReplayEngine.BotDriving), so
-        // testing it here would suppress every decision.
+        // testing it here would suppress every decision. Checked before _stepOnce is consumed,
+        // so a step armed mid-flight survives to the next cycle instead of being silently spent.
         if (ReplayEngine.HasPendingCommand) return;
+
+        // A dispatched shop purchase reports Ok as soon as it is STARTED, so the pending-command
+        // check above goes false while the game is still resolving it — during which the item is
+        // still on the shelf and the gold still unspent. Deciding in that window bought the same
+        // item repeatedly and crashed the game on a null CreationResult; see ShopPurchaseGate.
+        // Re-checked on a short timer rather than only on the 1 Hz heartbeat, so a shop trip
+        // doesn't cost a second per item.
+        if (ShopPurchaseGate.IsSettling)
+        {
+            ScheduleRecheck();
+            return;
+        }
+
+        // The gate CLASSIFIES rather than returns (paused-action-preview spec): paused with no
+        // step armed means this cycle decides but HOLDS its result (Dispatch caches it) instead
+        // of executing. _previewing must be computed before _stepOnce is cleared below, because
+        // IsGated() reads _stepOnce.
+        _previewing = IsGated();
+
+        // A step is spent only once a decision will actually run.
+        _stepOnce = false;
 
         RunDecision();
     }
@@ -396,12 +660,50 @@ public static class BotController
         tree.CreateTimer(HeartbeatSeconds).Connect("timeout", Callable.From(OnHeartbeat));
     }
 
+    /// <summary>
+    /// Re-enters the loop sooner than the next heartbeat would. Used only while
+    /// <see cref="ShopPurchaseGate"/> holds: that wait normally ends in a few hundred
+    /// milliseconds, and falling back to the 1 Hz heartbeat would stretch a five-item shop trip
+    /// into five seconds of visible idling. Safe to stack — <see cref="OnInputRequired"/> is
+    /// idempotent, and each timer fires once.
+    /// </summary>
+    private static void ScheduleRecheck()
+    {
+        // One outstanding re-check at a time. Several things re-enter OnInputRequired during a
+        // hold (the dispatcher's own poll, dispatchable-set changes, the heartbeat), and without
+        // this each would stack another timer for the same wait.
+        if (_recheckPending) return;
+
+        var tree = NGame.Instance?.GetTree();
+        // No tree means the heartbeat cannot have been scheduled either; the gate still releases
+        // on its own timeout, so this degrades to heartbeat pace rather than stalling.
+        if (tree == null) return;
+
+        _recheckPending = true;
+        tree.CreateTimer(ShopPurchaseGate.RecheckSeconds)
+            .Connect("timeout", Callable.From(OnInputRequired));
+    }
+
+    /// <summary>Whether a <see cref="ScheduleRecheck"/> timer is already outstanding.</summary>
+    private static bool _recheckPending;
+
     private static void OnHeartbeat()
     {
         if (!_running) return;
+
+        // Unconditional, including while paused: Tick() is self-guarding — on a healthy idle
+        // board nothing is in flight/blocked, so it zeroes its counter and returns immediately.
+        // Gating it here would only matter for a command that genuinely wedged mid-pause, and
+        // that's exactly the case recovery must not be suppressed for — a whole pause of
+        // silence would leave the run stuck with no sign of it in the log.
         StuckRecovery.Tick();
+
         OnInputRequired();
-        ScheduleHeartbeat();   // re-arm only while running, so the chain stops with the run
+
+        // Re-arm ALWAYS, including while paused — this is the only level-triggered path back into
+        // the loop (ReplayDispatcher's InputRequired signal is edge-triggered), so skipping the
+        // re-arm while paused would mean unpausing never resumes.
+        ScheduleHeartbeat();
     }
 
     // ── Decision loop ────────────────────────────────────────────────────────────────────
@@ -416,6 +718,16 @@ public static class BotController
             ctx = DecisionContext.Capture(_session);
             RoomOneShots.OnDecision(ctx);   // must precede Build — it masks spent one-shots
             RewardClaimMemory.OnDecision(ctx);   // must precede Build — it masks declined card claims
+
+            // Preview refresh gate (spec Component 1a): while paused with an action already
+            // held, an unchanged situation needs no recompute — skip ActionMap.Build,
+            // ObsBuilder.Build, and the policy's ONNX inference entirely. Compared against the
+            // key stored on the held preview, NOT _lastDecisionKey: that field belongs to
+            // AdvanceStuckGuard, which does not run while previewing, so it tracks the last
+            // EXECUTED decision and goes stale across a pause.
+            if (_previewing && _pending != null && BuildDecisionKey(ctx) == _pending.Key)
+                return;
+
             map = ActionMap.Build(_contract!, ctx, _session);
         }
         catch (Exception ex)
@@ -442,7 +754,13 @@ public static class BotController
             }
         }
 
-        if (!AdvanceStuckGuard(ctx, map))
+        // Skipped while previewing, and NOT deferred to commit either: a preview is a decision
+        // that never executed, so folding it into the guard's repeat accounting corrupts the
+        // count relative to what the bot actually did — and the guard's forced-fallback path
+        // chooses a DIFFERENT command than the one held, which would break the WYSIWYG
+        // guarantee if it ran at commit. Manual stepping through a genuinely stuck state
+        // therefore won't auto-recover; a human is watching, which is what the guard subs for.
+        if (!_previewing && !AdvanceStuckGuard(ctx, map))
         {
             GD.PrintErr($"[SpireBot] BotController: same decision recurred {_repeatCount + 1}x with no " +
                         $"observed state change (kind={ctx.Kind}) — forcing a fallback action.");
@@ -496,11 +814,17 @@ public static class BotController
         // goes false and this falls through to the normal chain below on the very next decision.
         var cardClaim = ctx.Available.OfType<ClaimRewardCommand>()
             .FirstOrDefault(RewardClaimMemory.IsPendingCardClaim);
-        if (cardClaim != null && RewardClaimMemory.TryBeginAutoAdvance(cardClaim))
+        // Previewing selects via the read-only probe and defers the REAL TryBeginAutoAdvance
+        // (which mutates the loop-backstop counter) to commit time via the CommitGate — see
+        // the spec's "Where the hold goes". Non-preview: inline, exactly as before.
+        if (cardClaim != null &&
+            (_previewing ? RewardClaimMemory.CanAutoAdvance(cardClaim)
+                         : RewardClaimMemory.TryBeginAutoAdvance(cardClaim)))
         {
             GD.Print($"[SpireBot] BotController: auto-advancing interstitial step " +
                      $"({cardClaim.Describe()}) — no RL action id models it.");
-            ActionExecutor.Execute(cardClaim, ctx.Kind);
+            Dispatch(cardClaim, ctx.Kind, ctx, map: null, obs: null, result: null,
+                     commitGate: () => RewardClaimMemory.TryBeginAutoAdvance(cardClaim));
             return true;
         }
 
@@ -533,7 +857,7 @@ public static class BotController
 
         GD.Print($"[SpireBot] BotController: auto-advancing interstitial step " +
                  $"({advance.Describe()}) — no RL action id models it.");
-        ActionExecutor.Execute(advance, ctx.Kind);
+        Dispatch(advance, ctx.Kind, ctx, map: null, obs: null, result: null);
         return true;
     }
 
@@ -585,7 +909,7 @@ public static class BotController
                 GD.PrintErr($"[SpireBot] BotController: MAPPING GAP — kind={ctx.Kind} has no action id " +
                             $"for any available command (available={available}); dispatching " +
                             $"'{scripted.Describe()}' as a scripted fallback to keep the run alive.");
-                ActionExecutor.Execute(scripted, ctx.Kind);
+                Dispatch(scripted, ctx.Kind, ctx, map, obs, result: null);
                 return;
             }
 
@@ -594,7 +918,8 @@ public static class BotController
             return;
         }
 
-        if (obs != null)
+        // Deferred to Commit while previewing, so dumps record only actions actually taken.
+        if (obs != null && !_previewing)
             DecisionDumper.Write(ctx, obs, map, result);
 
         try
@@ -608,7 +933,7 @@ public static class BotController
 
         try
         {
-            ActionExecutor.Execute(cmd, ctx.Kind);
+            Dispatch(cmd, ctx.Kind, ctx, map, obs, result);
         }
         catch (Exception ex)
         {
@@ -658,7 +983,7 @@ public static class BotController
             var rng = new Random();
             var chosen = crystalClicks[rng.Next(crystalClicks.Count)];
             GD.Print($"[SpireBot] BotController: Unsupported fallback — random Crystal Sphere click: {chosen}");
-            ActionExecutor.Execute(chosen, ctx.Kind);
+            Dispatch(chosen, ctx.Kind, ctx, map, obs: null, result: null);
             return;
         }
 
@@ -667,7 +992,7 @@ public static class BotController
         {
             var first = ctx.Available[0];
             GD.Print($"[SpireBot] BotController: Unsupported fallback — first available command: {first}");
-            ActionExecutor.Execute(first, ctx.Kind);
+            Dispatch(first, ctx.Kind, ctx, map, obs: null, result: null);
             return;
         }
 

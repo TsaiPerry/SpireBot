@@ -36,6 +36,11 @@ public static class MenuInjection
             // calls Stop() — without this, BotDriving/heartbeat survive an abandoned bot run
             // and the bot keeps dispatching into whatever is played next (it raced a
             // RunReplays playback to a chest and wedged its OpenChestCommand retry loop).
+            // Likewise for an armed-but-not-yet-attached Continue: a run abandoned before its
+            // first room loaded would otherwise leave that latch waiting, and the next run to
+            // enter a room would be attached to under the abandoned run's seed.
+            RunContinueAttach.Disarm();
+
             if (BotController.IsRunning)
             {
                 GD.Print("[SpireBot] MenuInjection: main menu reached with the bot still " +

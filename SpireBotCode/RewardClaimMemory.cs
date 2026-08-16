@@ -93,6 +93,17 @@ internal static class RewardClaimMemory
         return RewardScreenClassifier.ResolveRewardKind(claim.RewardIndex) == RewardKind.Card;
     }
 
+    /// <summary>Read-only probe of <see cref="TryBeginAutoAdvance"/>'s decision, for the paused
+    /// preview (paused-action-preview spec): selection during a preview must not mutate the
+    /// loop-backstop counter, or aborted previews would burn claim attempts the bot never made.
+    /// The probe and the deferred real call cannot disagree — the counter mutates only on
+    /// commits and unpaused dispatches, neither of which can interleave between a preview and
+    /// its own commit. Declined indexes are already excluded upstream by
+    /// <see cref="IsPendingCardClaim"/>.</summary>
+    internal static bool CanAutoAdvance(ClaimRewardCommand claim)
+        => (_autoAdvanceCounts.TryGetValue(claim.RewardIndex, out int c) ? c : 0)
+           < MaxAutoAdvancesBeforeForcedDecline;
+
     /// <summary>
     /// Called by <see cref="BotController.TryAutoAdvance"/> right before it would dispatch
     /// <paramref name="claim"/> as an interstitial. Applies the loop backstop (brief #4): once
