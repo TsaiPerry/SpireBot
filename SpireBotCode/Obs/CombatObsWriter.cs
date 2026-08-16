@@ -57,7 +57,7 @@ public static class CombatObsWriter
     private const int MaxPowersEnemy = 16;
     private const int MaxRelicRows = 48;
     private const int MaxCombatCards = 96;
-    private const int NCardFeatures = 29;
+    private const int NCardFeatures = 31;
 
     // Round 6 fix 4 — see the S(23, ...) magic_number scan in WriteCardFeatures for the
     // full citation. Priority order copied verbatim from sts2_rl/cards/base.py's
@@ -449,7 +449,7 @@ public static class CombatObsWriter
         return truncated;
     }
 
-    /// <summary>The 29-float per-hand-card feature row — <c>full_env.card_features</c>
+    /// <summary>The 31-float per-hand-card feature row — <c>full_env.card_features</c>
     /// ported field-for-field. See this method's inline comments for the handful of
     /// fields with no confirmed 1:1 C# source (flagged, not guessed).</summary>
     private static void WriteCardFeatures(float[] f, LayoutSlice slice, int baseIdx, ICombatState combatState, Player player, PlayerCombatState pcs, CardModel card)
@@ -553,6 +553,25 @@ public static class CombatObsWriter
             {
                 GD.PrintErr($"[SpireBot] WriteCardFeatures: Hook.ModifyBlock threw for {card.Id}: {ex.Message}");
             }
+            // v14 (schema 8): true block under the powered/move pipeline (Dexterity,
+            // Frail, Fasten) — sim f[30] (preview_card_block ValueProp.MOVE), unlike
+            // field 21's default(ValueProp) parity value above (kept untouched).
+            // Reuses this same `baseBlock is decimal bb` guard — sim's condition for
+            // f[30] is identical to f[20]/f[21]'s ("card_base_block is not None").
+            // Truncated toward zero before scaling: sim's preview_card_block returns
+            // max(0, int(...)) (sts2_rl/previews.py:243-245), matching BlockCmd.apply's
+            // int cast — a fractional multiplicative result (e.g. Frail's 0.75x) must
+            // floor/truncate here too or C# and sim diverge (Frail: sim 3 vs C# 3.75).
+            // Negative clamping is already covered by Clip01 below.
+            try
+            {
+                decimal mvBlock = Hook.ModifyBlock(combatState, player.Creature, bb, ValueProp.Move, card, null, out _);
+                S(30, Clip01((float)decimal.Truncate(mvBlock) / AbsScale));
+            }
+            catch (Exception ex)
+            {
+                GD.PrintErr($"[SpireBot] WriteCardFeatures: Hook.ModifyBlock(Move) threw for {card.Id}: {ex.Message}");
+            }
         }
 
         if (vars.ContainsKey("HpLoss"))
@@ -600,6 +619,8 @@ public static class CombatObsWriter
         S(26, card.ShouldRetainThisTurn ? 1f : 0f);
         S(27, card.IsSlyThisTurn ? 1f : 0f);
         S(28, Clip01(card.BaseReplayCount / 3f));
+        // v14 (schema 8): the card face's gold-glow condition signal — sim f[29].
+        S(29, card.ShouldGlowGold ? 1f : 0f);
     }
 
     // ── enemies ──────────────────────────────────────────────────────────

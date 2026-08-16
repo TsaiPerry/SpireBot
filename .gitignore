@@ -1,6 +1,8 @@
 local.props
 !local.props.template
 
+
+
 .godot/
 bin/
 obj/
@@ -18,6 +20,8 @@ packages/
 .vscode/*
 /.dotnet
 .directory
+
+docs/
 
 .superpowers/
 
