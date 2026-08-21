@@ -118,7 +118,12 @@ public static class BotController
         var held = _pending;
         if (held != null)
         {
+            // Invariant: anything that consumes the hold must also cancel the dwell
+            // bookkeeping, or _dwellArmed stays true and OnInputRequired's gate blocks the
+            // loop until the now-orphaned timer eventually fires and finds a stale seq.
             _pending = null;   // cleared BEFORE executing, so a throw can never double-commit
+            _dwellArmed = false;
+            _dwellSeq++;
             Commit(held);
             return;
         }
@@ -133,9 +138,10 @@ public static class BotController
     /// is the situation the automatic guard exists to substitute for.</summary>
     private static void Commit(PendingAction held)
     {
-        // Defensive: the gate's counter only mutates on commits and unpaused dispatches, so it
-        // cannot have changed since the probe selected this command — but honor a refusal
-        // anyway, matching the unpaused forced-decline path (which also executes nothing).
+        // The gate's counter only mutates on commits and unpaused dispatches, but the probe
+        // that selected this command and this commit can be seconds apart — a pacing dwell,
+        // or a whole pause, can sit between them — so a re-check here is not purely defensive.
+        // Honor a refusal the same way the unpaused forced-decline path does: execute nothing.
         if (held.CommitGate != null && !held.CommitGate())
         {
             GD.PrintErr($"[SpireBot] BotController.Commit: commit gate refused " +
@@ -218,7 +224,9 @@ public static class BotController
     // needs Result non-null, and the only path that supplies Result supplies Map/Obs too.
     // CommitGate defers the card-claim branch's TryBeginAutoAdvance — the one selection-time
     // side effect that lives upstream of ActionExecutor.Execute (see the spec's "Where the
-    // hold goes" for why previewing must not run it, and why probe and gate cannot disagree).
+    // hold goes" for why the probe must not run it early, and why probe and gate cannot
+    // disagree) — for every kind of hold, not just a paused preview: a pacing dwell defers it
+    // exactly the same way, running the gate only once Commit actually fires.
     private sealed record PendingAction(
         ReplayCommand Cmd, DecisionKind Kind,
         DecisionContext Ctx, ActionMap? Map, ObsResult? Obs, PolicyResult? Result,
