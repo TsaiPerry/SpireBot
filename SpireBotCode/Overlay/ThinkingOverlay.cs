@@ -32,6 +32,11 @@ public sealed partial class ThinkingOverlay : CanvasLayer
     private static ThinkingOverlay? _instance;
     private static bool _subscribed;
 
+    /// <summary>True while a ShowStatus message (a pre-attach failure like a bad contract
+    /// path) should keep the panel visible even though no run is attached — without this,
+    /// gating visibility on IsRunning would make exactly those failures invisible.</summary>
+    private static bool _showingStatus;
+
     private Label _kindLabel = null!;
     private Label _actionLabel = null!;
     private VBoxContainer _topKBox = null!;
@@ -74,6 +79,7 @@ public sealed partial class ThinkingOverlay : CanvasLayer
     /// </summary>
     public static void ShowStatus(string message)
     {
+        _showingStatus = true;
         Ensure();
         var overlay = _instance;
         if (overlay == null) return;
@@ -88,6 +94,31 @@ public sealed partial class ThinkingOverlay : CanvasLayer
                 child.QueueFree();
             // Visibility stays under SpireBotConfig.ShowOverlay (_Process reasserts it anyway);
             // the same message is always on the log for an overlay-off run.
+        }).CallDeferred();
+    }
+
+    /// <summary>
+    /// Clears the decision display and hides the panel — called from
+    /// <see cref="BotController.Stop"/> so the overlay never keeps exhibiting the last
+    /// decision of a run that is over (2026-08-20 UX pacing spec §4). The node itself stays
+    /// alive and subscribed; the next run's attach repopulates it fresh. Safe from any
+    /// thread — the UI writes are deferred like every other mutation in this class.
+    /// </summary>
+    public static void OnRunEnded()
+    {
+        _showingStatus = false;
+        var overlay = _instance;
+        if (overlay == null) return;
+
+        Callable.From(() =>
+        {
+            // _Ready may not have run yet if Stop raced the very first Ensure().
+            if (!GodotObject.IsInstanceValid(overlay) || overlay._kindLabel == null) return;
+            overlay._kindLabel.Text = "Decision: <none yet>";
+            overlay._actionLabel.Text = "Chosen: <none yet>";
+            foreach (Node child in overlay._topKBox.GetChildren())
+                child.QueueFree();
+            overlay.UpdateVisibility();
         }).CallDeferred();
     }
 
@@ -158,6 +189,7 @@ public sealed partial class ThinkingOverlay : CanvasLayer
     {
         if (!GodotObject.IsInstanceValid(this)) return;
 
+        _showingStatus = false;   // a live decision supersedes any stale status message
         _kindLabel.Text = $"Decision: {kind}";
         _actionLabel.Text = $"Chosen: {actionLabel}";
 
@@ -207,6 +239,9 @@ public sealed partial class ThinkingOverlay : CanvasLayer
 
     private void UpdateVisibility()
     {
-        Visible = SpireBotConfig.ShowOverlay;
+        // Attached-or-status, not just the config flag (2026-08-20 UX pacing spec §4): the
+        // overlay exists for the run being advised/driven; after Stop it must disappear
+        // rather than exhibit the last decision of a run that is over.
+        Visible = SpireBotConfig.ShowOverlay && (BotController.IsRunning || _showingStatus);
     }
 }

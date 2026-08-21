@@ -448,6 +448,7 @@ public static class BotController
         ReplayDispatcher.RestoreGameSpeed();
         Unsubscribe();
         UnsubscribeCombatHooks();
+        ThinkingOverlay.OnRunEnded();
         GD.Print("[SpireBot] BotController.Stop — decision loop stopped.");
     }
 
