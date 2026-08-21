@@ -10,9 +10,9 @@ namespace SpireBot.SpireBotCode.Overlay;
 /// Subscribes to <see cref="BotController.DecisionMade"/> for its data.
 ///
 /// Lifecycle: <see cref="Ensure"/> is idempotent (safe to call repeatedly from any thread) and
-/// is called both from <see cref="BotController.StartBotRun"/> and lazily on the very first
-/// <see cref="BotController.DecisionMade"/> event, so the overlay exists exactly once no matter
-/// which path runs first. The node is added directly under the active
+/// is called both from <see cref="BotController.PrepareDriver"/> (every attach) and lazily on
+/// the very first <see cref="BotController.DecisionMade"/> event, so the overlay exists exactly
+/// once no matter which path runs first. The node is added directly under the active
 /// <c>SceneTree.Root</c> — not under any screen-specific node — so it survives every scene
 /// change (map -> combat -> shop -> ...) for the life of the process, the same pattern
 /// <c>((SceneTree)Engine.GetMainLoop()).Root</c> gives any persistent overlay in Godot 4 when a
@@ -68,8 +68,9 @@ public sealed partial class ThinkingOverlay : CanvasLayer
 
     /// <summary>
     /// Shows a one-line status/error in the overlay. Used for failures that would otherwise be
-    /// invisible in game (a Bot Run that aborts before its first decision looks like a dead
-    /// button). Safe from any thread — the UI write is deferred like the decision updates.
+    /// invisible in game (an attach that aborts before its first decision would otherwise leave
+    /// no visible sign anything went wrong). Safe from any thread — the UI write is deferred like
+    /// the decision updates.
     /// </summary>
     public static void ShowStatus(string message)
     {

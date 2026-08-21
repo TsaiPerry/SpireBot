@@ -44,16 +44,16 @@ public static class BotController
     public static event Action<DecisionContext, PolicyResult>? DecisionMade;
 
     /// <summary>The policy driving decisions. Defaults to <see cref="FirstLegalPolicy"/>;
-    /// <see cref="SelectPolicy"/> (Task 14, called from <see cref="StartBotRun"/>) swaps this
+    /// <see cref="SelectPolicy"/> (Task 14, called from PrepareDriver on every attach) swaps this
     /// to an <see cref="OnnxPolicy"/> when <see cref="SpireBotConfig.OnnxModelPath"/> is set and
     /// the model loads + validates against the contract, logging which policy won either way.
-    /// Settable directly too (e.g. tests) — <see cref="StartBotRun"/> always re-derives it from
-    /// config on every run start, so a manual override only lasts until the next run starts.</summary>
+    /// Settable directly too (e.g. tests) — every attach re-derives it from config on every run
+    /// start, so a manual override only lasts until the next run starts.</summary>
     public static IPolicy Policy { get; set; } = new FirstLegalPolicy();
 
     private static bool _running;
 
-    /// <summary>True while the bot decision loop is driving a run (StartBotRun..Stop).
+    /// <summary>True while the bot decision loop is driving a run (AttachToRun..Stop).
     /// MenuInjection uses this to stop an abandoned bot run when the main menu is reached.</summary>
     public static bool IsRunning => _running;
 
@@ -64,7 +64,7 @@ public static class BotController
     /// True while the decision loop is held by the overlay's pause control (BotControlBar).
     /// A paused bot stops *choosing* actions; a command already dispatched still runs to
     /// completion, because the bot enqueues into the vendored dispatcher rather than acting
-    /// directly. Reset at every <see cref="StartBotRun"/> and <see cref="Stop"/>.
+    /// directly. Reset at every <see cref="AttachToRun"/> and <see cref="Stop"/>.
     /// </summary>
     public static bool Paused
     {
@@ -214,7 +214,7 @@ public static class BotController
     // executing; Step commits exactly this instance (the WYSIWYG guarantee — with Temperature
     // above 0 a re-decide would resample and could act differently than it showed). Refreshed
     // only when BuildDecisionKey changes (Component 1a); cleared on unpause (Paused setter),
-    // hence also on StartBotRun/Stop which set Paused = false, and on every commit.
+    // hence also on AttachToRun/Stop which set Paused = false, and on every commit.
     //
     // Map is nullable because TryAutoAdvance has no ActionMap in scope; the deferred dump
     // needs Result non-null, and the only path that supplies Result supplies Map/Obs too.
@@ -253,7 +253,7 @@ public static class BotController
     // enemy intent history, the unmapped-game-id log-once latch — see SessionState's
     // own doc comment for why it's wired to CombatManager's TurnStarted/CombatSetUp
     // events rather than derived from this class's own settle-signal loop). _obsBuilder
-    // is rebuilt alongside _session every StartBotRun (it closes over both _contract and
+    // is rebuilt alongside _session on every attach (it closes over both _contract and
     // _session, and both are per-run).
     private static readonly SessionState _session = new();
     private static ObsBuilder? _obsBuilder;
@@ -280,92 +280,14 @@ public static class BotController
     private static int _repeatCount;
 
     /// <summary>
-    /// Starts a fresh Ironclad, ascension-0, standard-mode singleplayer run and begins the bot
-    /// decision loop. Mirrors RunReplays' <c>RunReplayMenu.StartReplay</c> invocation of
-    /// <c>NGame.Instance.StartNewSingleplayerRun(...)</c> (RunReplayMenu.cs:638-646), minus the
-    /// replay-log loading (<c>ReplayDispatcher.Load</c>/<c>ReplayEngine.ActiveSeed</c>/
-    /// <c>ReplayEngine.IsReplayRun</c>) that only applies to played-back recordings.
-    /// </summary>
-    /// <param name="seed">
-    /// Run seed, or null/empty to roll a random one HERE. Task 14's "empty string means
-    /// randomize" assumption was FALSE: <c>StartNewSingleplayerRun</c> passes the string
-    /// straight into <c>new RunRngSet(seed)</c>, which deterministically hashes whatever it
-    /// gets (RunRngSet.cs:104-107) — an empty string is a fixed seed, so every bot run played
-    /// the same run. The game itself never relies on empty-means-random: every real entry
-    /// point rolls <c>SeedHelper.GetRandomSeed()</c> up front when no seed was given
-    /// (NGame.cs:299, StartRunLobby.cs:725, RunState.cs:308), so we do the same.
-    /// </param>
-    public static void StartBotRun(string? seed = null)
-    {
-        // See the param doc: empty is a FIXED seed, not "randomize" — roll like the game does.
-        if (string.IsNullOrWhiteSpace(seed))
-            seed = SeedHelper.GetRandomSeed();
-
-        if (_running)
-        {
-            GD.Print("[SpireBot] BotController.StartBotRun called while already running — ignoring.");
-            return;
-        }
-
-        if (!PrepareDriver())
-            return;
-
-        if (NGame.Instance == null)
-        {
-            GD.PrintErr("[SpireBot] BotController.StartBotRun: NGame.Instance is null — cannot start a run.");
-            return;
-        }
-
-        // RunReplayMenu.StartReplay resolves the character by matching CharacterModel.Id.Entry
-        // against a stored log string (RunReplayMenu.cs:620-622). SpireBot always wants
-        // Ironclad; "IRONCLAD" is confirmed as the exact Id.Entry value from a real recorded
-        // log's header (RunReplays/Resources/89U21BV1TZ/floor_49/actions.sts2replay:1,
-        // "# Character: IRONCLAD").
-        CharacterModel? character = ModelDb.AllCharacters.FirstOrDefault(c => c.Id.Entry == "IRONCLAD");
-        if (character == null)
-        {
-            GD.PrintErr("[SpireBot] BotController.StartBotRun: could not resolve the Ironclad " +
-                        "CharacterModel (no ModelDb.AllCharacters entry with Id.Entry == \"IRONCLAD\").");
-            return;
-        }
-
-        BeginDriving(seed, SpireBotConfig.StartPaused);
-
-        GD.Print($"[SpireBot] BotController.StartBotRun — character={character.Id} " +
-                 $"seed='{seed}' ascension=0");
-
-        NAudioManager.Instance?.StopMusic();
-        SfxCmd.Play(character.CharacterTransitionSfx);
-
-        // RunReplayMenu.cs:638-646 — same call shape, minus the replay-log plumbing:
-        //   NGame.Instance.StartNewSingleplayerRun(character, shouldSave, acts, modifiers,
-        //       seed, gameMode, ascensionLevel)
-        TaskHelper.RunSafely(
-            NGame.Instance.StartNewSingleplayerRun(
-                character,
-                shouldSave: true,
-                ActModel.GetDefaultList(),
-                [],
-                seed,
-                GameMode.Standard,
-                0));
-
-        Subscribe();
-    }
-
-    /// <summary>
     /// Attaches the decision loop to a run that is ALREADY in progress — one the player resumed
-    /// with the game's own Continue button (see <see cref="RunContinueAttach"/>) rather than one
-    /// this class started. Always attaches PAUSED: the bot advises, the human plays, and Play
-    /// hands the run over whenever they want it to.
-    ///
-    /// Everything <see cref="StartBotRun"/> does per run happens here too, minus the parts that
-    /// only make sense for a brand-new run — resolving the character, the transition sfx, and
-    /// the <c>StartNewSingleplayerRun</c> call itself. One consequence of attaching mid-run is
-    /// that <see cref="SessionState"/> starts empty, so the ACCUMULATE-shaped observation
-    /// features (enemy intent history in particular) are blank until the current combat has run
-    /// a turn or two. The advice is still well-formed, just slightly less informed on the first
-    /// combat after attaching.
+    /// with the game's own Continue button, or a brand-new run they started themselves (see
+    /// <see cref="RunContinueAttach"/>/<c>RunNewAttach</c>). This is now the ONLY entry point
+    /// into the decision loop, reached for every eligible run. One consequence of attaching
+    /// mid-run is that <see cref="SessionState"/> starts empty, so the ACCUMULATE-shaped
+    /// observation features (enemy intent history in particular) are blank until the current
+    /// combat has run a turn or two. The advice is still well-formed, just slightly less
+    /// informed on the first combat after attaching.
     /// </summary>
     /// <param name="seed">The resumed run's seed, used only to name the decision-dump directory.</param>
     public static void AttachToRun(string seed)
@@ -379,11 +301,9 @@ public static class BotController
         if (!PrepareDriver())
             return;
 
-        // startPaused is hard-coded rather than read from config: this entry point exists to
-        // advise a human who is playing, so taking over their resumed run unannounced would be
-        // the one behavior nobody asked for. SpireBotConfig.StartPaused gates whether we attach
-        // at all (RunContinueAttach), not whether we then drive.
-        BeginDriving(seed, startPaused: true);
+        // Advisor by default; AutopilotByDefault (an explicit opt-in) starts driving
+        // immediately — the replacement for the deleted Bot Run button's grind-run use case.
+        BeginDriving(seed, startPaused: !SpireBotConfig.AutopilotByDefault);
 
         GD.Print($"[SpireBot] BotController.AttachToRun — advising the in-progress run " +
                  $"seed='{seed}' (paused; press Play to hand it over).");
@@ -405,10 +325,9 @@ public static class BotController
     }
 
     /// <summary>
-    /// Per-run state reset shared by <see cref="StartBotRun"/> and <see cref="AttachToRun"/>:
-    /// marks the driver attached, applies the starting pause and speed, and clears every piece
-    /// of run-scoped memory. Callers still own their own <see cref="Subscribe"/> call, because
-    /// StartBotRun must subscribe only after it has kicked off the new run.
+    /// Per-run state reset used by <see cref="AttachToRun"/>: marks the driver attached, applies
+    /// the starting pause and speed, and clears every piece of run-scoped memory. The caller
+    /// still owns its own <see cref="Subscribe"/> call, kept as a separate step after this reset.
     /// </summary>
     private static void BeginDriving(string seed, bool startPaused)
     {
@@ -485,8 +404,7 @@ public static class BotController
     ///
     /// Reads the same live <c>RunManager</c> properties the capture patches cache, guarded by
     /// the current room's type so a synchronizer left over from a previous room can never be
-    /// misattributed. StartBotRun is unaffected either way: it resets BEFORE the run exists
-    /// (no current room), and the new run's patches then fire in the normal order.
+    /// misattributed.
     /// </summary>
     private static void RecaptureOpenRoomState()
     {
@@ -514,7 +432,7 @@ public static class BotController
     }
 
     /// <summary>Stops the bot decision loop. Does not end the in-progress run — it just stops
-    /// driving it; the player (or another BotController.StartBotRun call) can take over.</summary>
+    /// driving it; the player (or another BotController.AttachToRun call) can take over.</summary>
     public static void Stop()
     {
         _running = false;
@@ -604,9 +522,9 @@ public static class BotController
 
         static void Fail(string reason)
         {
-            string message = $"Bot Run aborted — {reason}. Set ContractPath in SpireBot's config screen.";
-            GD.PrintErr($"[SpireBot] BotController.StartBotRun: {message}");
-            // Without this the failure is invisible in game: the button appears to do nothing.
+            string message = $"SpireBot attach aborted — {reason}. Set ContractPath in SpireBot's config screen.";
+            GD.PrintErr($"[SpireBot] BotController.TryLoadContract: {message}");
+            // Without this the failure is invisible in game: the attach appears to do nothing.
             ThinkingOverlay.ShowStatus(message);
         }
     }
@@ -619,7 +537,7 @@ public static class BotController
     /// is the ONE place that swallows an <see cref="OnnxPolicyException"/> into a fallback
     /// rather than propagating it; every other error path (per-decision inference failures)
     /// falls back inside <see cref="OnnxPolicy.Choose"/>/<see cref="DispatchWithFallback"/>
-    /// instead. Disposes a previously-loaded OnnxPolicy first so a second StartBotRun (or a
+    /// instead. Disposes a previously-loaded OnnxPolicy first so a second attach (or a
     /// hot-reload of the model path) never leaks its InferenceSession.
     /// </summary>
     private static void SelectPolicy()
@@ -685,7 +603,7 @@ public static class BotController
 
         // Prime the loop immediately rather than waiting for the first natural signal —
         // the run may already have a pending decision (e.g. a starting-bonus screen) by the
-        // time StartBotRun's deferred run-start work finishes.
+        // time this attach's deferred run-start work finishes.
         Callable.From(OnInputRequired).CallDeferred();
 
         // ...and keep re-checking, because that signal is edge-triggered (see ScheduleHeartbeat).

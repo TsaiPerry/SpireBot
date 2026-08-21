@@ -141,7 +141,7 @@ internal enum ScreenFamily
 ///
 /// Marking is per-(room, family) like <see cref="RoomOneShots"/>/<see cref="RewardClaimMemory"/>
 /// (a fresh room can legitimately reopen either screen) — cleared on room change (see
-/// <see cref="OnDecision"/>) and on run start (<see cref="BotController.StartBotRun"/> via
+/// <see cref="OnDecision"/>) and on run start (<see cref="BotController.BeginDriving"/> via
 /// <see cref="Reset"/>).
 /// </summary>
 internal static class ScreenExitMemory

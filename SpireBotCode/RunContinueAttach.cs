@@ -10,8 +10,7 @@ namespace SpireBot.SpireBotCode;
 
 /// <summary>
 /// Attaches the bot as a paused ADVISOR to a run the player resumed with the game's own Continue
-/// button, so "Will take: ..." shows up on a continued run the same way it does on one started
-/// from the mod's own "Bot Run" button (<see cref="MenuInjection"/>).
+/// button, so "Will take: ..." shows up on a continued run.
 ///
 /// Two-stage, because the obvious single hook is mis-timed. <c>RunManager.SetUpSavedSingleplayer</c>
 /// is <c>async Task</c> with a real await before it finishes, so a Harmony postfix on it runs at
@@ -35,8 +34,7 @@ public static class RunContinueAttach
     /// <see cref="RunNewAttach"/>, which applies the same rule to brand-new runs.</summary>
     internal const string SupportedCharacter = "IRONCLAD";
 
-    /// <summary>The ascension the policy was trained at, and the one <see cref="BotController.StartBotRun"/>
-    /// hard-codes for the runs it starts itself. Shared with <see cref="RunNewAttach"/>.</summary>
+    /// <summary>The ascension the policy was trained at. Shared with <see cref="RunNewAttach"/>.</summary>
     internal const int SupportedAscension = 0;
 
     private static bool _armed;
@@ -69,11 +67,6 @@ public static class RunContinueAttach
         if (save == null)
             return false;
 
-        // The advisor is exactly what StartPaused asks for, so it gates this too rather than
-        // adding a second setting. Off means Continue behaves as it did before this feature.
-        if (!SpireBotConfig.StartPaused)
-            return false;
-
         if (BotController.IsRunning)
         {
             GD.Print("[SpireBot] RunContinueAttach: a run is already being driven — not attaching.");
@@ -98,9 +91,8 @@ public static class RunContinueAttach
             return false;
         }
 
-        // Same reasoning as the character check, and the same value StartBotRun hard-codes for
-        // the runs it starts: the policy was trained at ascension 0, and the ascension modifiers
-        // change the rules the advice is reasoning about.
+        // Same reasoning as the character check: the policy was trained at ascension 0, and the
+        // ascension modifiers change the rules the advice is reasoning about.
         if (save.Ascension != SupportedAscension)
         {
             GD.Print($"[SpireBot] RunContinueAttach: resumed run is ascension {save.Ascension}, " +
@@ -171,8 +163,7 @@ public static class RunContinueAttach
 /// <summary>
 /// The same paused-advisor attach as <see cref="RunContinueAttach"/>, for a BRAND-NEW run the
 /// player starts through the game's own character-select flow — without this, "Will take: ..."
-/// only ever showed on continued runs and the mod's own "Bot Run" button, and a normal new run
-/// got no overlay at all.
+/// only ever showed on continued runs, and a normal new run got no overlay at all.
 ///
 /// Timing mirrors the Continue path exactly. <c>RunManager.SetUpNewSingleplayer</c> runs
 /// synchronously inside <c>NGame.StartNewSingleplayerRun</c> (NGame.cs:741) BEFORE
@@ -180,11 +171,6 @@ public static class RunContinueAttach
 /// decisions against a half-loaded run; the postfix only arms, and the attach happens on the
 /// first <c>RunManager.RoomEntered</c> via <see cref="RunContinueAttach.ArmForSeed"/>'s shared
 /// latch.
-///
-/// Runs the bot starts itself take this same code path (<see cref="BotController.StartBotRun"/>
-/// calls <c>StartNewSingleplayerRun</c>), but StartBotRun marks the bot running (its
-/// BeginDriving reset) BEFORE that call, so the <see cref="BotController.IsRunning"/> guard
-/// below declines them and the bot never advises its own run twice.
 /// </summary>
 [HarmonyPatch(typeof(RunManager), nameof(RunManager.SetUpNewSingleplayer))]
 public static class RunNewAttach
@@ -215,12 +201,8 @@ public static class RunNewAttach
         if (state == null)
             return false;
 
-        // Same single setting as the Continue path: StartPaused IS the advisor switch.
-        if (!SpireBotConfig.StartPaused)
-            return false;
-
-        // True here means BotController.StartBotRun initiated this run and is already driving
-        // it — expected on every bot run, so no log line.
+        // Defensive re-entrancy guard: a run is already being driven/advised, so this new
+        // SetUpNewSingleplayer (whatever triggered it) must not double-attach.
         if (BotController.IsRunning)
             return false;
 

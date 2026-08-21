@@ -54,12 +54,14 @@ public class SpireBotConfig : SimpleModConfig
     public static float DecisionSpeed { get; set; } = 1.0f;
 
     /// <summary>
-    /// When true (the default), a bot run begins paused: the bot never acts on its own, and the
-    /// overlay shows the action it would take, so a human can play the run manually with the
-    /// policy as an advisor. Press Play on the overlay to hand the run over to the bot at any
-    /// point. Turn this off for autonomous grind runs, which should start driving immediately.
+    /// When true, the bot drives every attached run itself from the first room. When false
+    /// (the default), it attaches to every eligible run as a paused ADVISOR — the overlay
+    /// shows what it would do, and the 🤖 Autopilot toggle on the overlay hands the run over
+    /// (or back) at any time. Replaces the old always-start-paused knob (inverted sense) as part of
+    /// the 2026-08-20 UX pacing change, which also removed the main menu's "Bot Run" button:
+    /// the bot is now always attached to eligible runs, and this only chooses who drives first.
     /// </summary>
-    public static bool StartPaused { get; set; } = true;
+    public static bool AutopilotByDefault { get; set; } = false;
 
     /// <summary>
     /// Runs the contract self-test at startup and the per-decision observation self-check.

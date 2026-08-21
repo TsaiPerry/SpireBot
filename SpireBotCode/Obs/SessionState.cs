@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -172,7 +172,7 @@ public readonly struct EnemyIntentSnapshot
 /// <summary>
 /// Per-run accumulator for observation state the live game exposes no
 /// running counter for (the schema audit's ACCUMULATE rows). Reset once per
-/// bot run by <see cref="BotController.StartBotRun"/>; the enemy
+/// bot run by <see cref="BotController.BeginDriving"/>; the enemy
 /// intent-history table is additionally reset at the start of every combat
 /// (<see cref="OnCombatStarted"/>) since sts2-rl's own recorder
 /// (<c>CombatState._intent_history</c>) is itself a fresh per-combat dict,
@@ -267,7 +267,7 @@ public sealed class SessionState
     public int? CombatStartHp { get; private set; }
     public int? CombatStartMaxHp { get; private set; }
 
-    /// <summary>Full reset â€” called once per bot run by <see cref="BotController.StartBotRun"/>.</summary>
+    /// <summary>Full reset â€” called once per bot run by <see cref="BotController.BeginDriving"/>.</summary>
     public void ResetRun()
     {
         _history.Clear();

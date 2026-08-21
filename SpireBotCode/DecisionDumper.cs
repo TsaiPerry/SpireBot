@@ -24,7 +24,7 @@ namespace SpireBot.SpireBotCode;
 /// off), and <see cref="Write"/> no-ops if no file is open.
 ///
 /// <c>decision_index</c> is a per-(act, floor, kind) running counter, reset once per bot run
-/// (<see cref="ResetRun"/>, called from <see cref="BotController.StartBotRun"/> alongside
+/// (<see cref="ResetRun"/>, called from <see cref="BotController.AttachToRun"/> alongside
 /// <c>SessionState.ResetRun</c>) and incremented on every <see cref="Write"/> call for that
 /// exact (act, floor, kind) triple — deterministic given a deterministic decision sequence, per
 /// the task brief ("make the counter deterministic"). <c>floor</c> alone is not a run-unique

@@ -6,8 +6,8 @@ using Godot;
 namespace SpireBot.SpireBotCode.Overlay;
 
 /// <summary>
-/// The overlay's live transport controls: pause/play, a speed ladder (◀ 2.0x ▶), and a step button
-/// that only appears while paused. Mirrors RunReplays' replay control bar
+/// The overlay's live transport controls: an Autopilot on/off toggle, a speed ladder (◀ 2.0x ▶),
+/// and a step button that only appears while paused. Mirrors RunReplays' replay control bar
 /// (RunReplays/RunOverlay.cs:189-343) for the live bot.
 ///
 /// Owned by <see cref="ThinkingOverlay"/>, which adds one instance as the first row of its panel
@@ -30,7 +30,7 @@ public sealed partial class BotControlBar : HBoxContainer
         // whatever is underneath (a card, a map node).
         MouseFilter = MouseFilterEnum.Stop;
 
-        _pauseButton = MakeButton("⏸ Pause", OnPausePressed);
+        _pauseButton = MakeButton("🤖 Auto: OFF", OnAutopilotPressed);
         AddChild(_pauseButton);
 
         AddChild(MakeButton("◀", OnSpeedDown));
@@ -64,7 +64,7 @@ public sealed partial class BotControlBar : HBoxContainer
         return button;
     }
 
-    private static void OnPausePressed()
+    private static void OnAutopilotPressed()
     {
         BotController.Paused = !BotController.Paused;
     }
@@ -100,7 +100,7 @@ public sealed partial class BotControlBar : HBoxContainer
         if (!Visible) return;
 
         bool paused = BotController.Paused;
-        _pauseButton.Text = paused ? "▶ Play" : "⏸ Pause";
+        _pauseButton.Text = paused ? "🤖 Auto: OFF" : "🤖 Auto: ON";
         _stepButton.Visible = paused;
         _speedLabel.Text = PacingPlan.IsInstant(SpireBotConfig.DecisionSpeed)
             ? "Inst"

@@ -83,7 +83,7 @@ public static class BotControlSelfTest
 
             // Pause/step/preview gate state machine (paused-action-preview spec). Safe to
             // exercise at mod init: no run is active (BotController._running is false), so
-            // arming a step here can never fire a decision, and StartBotRun resets Paused
+            // arming a step here can never fire a decision, and BeginDriving resets Paused
             // anyway. Only the pure state transitions are asserted — the preview cache itself
             // can only fill during a live run, so here it must stay empty throughout.
             BotController.StepOnce();

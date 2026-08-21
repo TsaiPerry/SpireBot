@@ -33,7 +33,7 @@ public static class ReplayEngine
     /// reads. With it pinned false the dispatcher was blind: every decision came back
     /// Unsupported with zero available commands, and since LogDispatchableChanges only emits
     /// InputRequired for a NON-EMPTY set, the bot then never woke again. Set for the whole
-    /// bot run by <c>BotController.StartBotRun</c>.
+    /// bot run by <c>BotController.BeginDriving</c>.
     /// </summary>
     public static bool BotDriving { get; internal set; }
 
