@@ -76,9 +76,13 @@ public static class BotController
             {
                 // Leaving pause discards an un-consumed step, so pausing again later doesn't
                 // hand out a free decision the user never asked for — and discards any held
-                // preview, so it can never fire unattended after the user resumes.
+                // preview, so it can never fire unattended after the user resumes. A dwell
+                // armed when the pause began is cancelled the same way (seq bump), so its
+                // timer can never commit a stale hold; the next cycle re-decides fresh.
                 _stepOnce = false;
                 _pending = null;
+                _dwellArmed = false;
+                _dwellSeq++;
             }
         }
     }
@@ -139,9 +143,21 @@ public static class BotController
             return;
         }
 
-        // Deferred from the preview cycle so dumps record only actions actually taken.
+        // All dumps happen here, at commit — so dumps record only actions actually taken,
+        // whether the hold was a preview or a pacing dwell.
         if (held.Result != null && held.Obs != null && held.Map != null)
             DecisionDumper.Write(held.Ctx, held.Obs, held.Map, held.Result);
+
+        // 2026-08-20 audit lesson: fallback/interstitial actions used to bypass decisions.jsonl
+        // entirely, so a dump could look perfectly faithful while the session log carried ~50
+        // silent non-policy actions. Every non-policy dispatch (result == null) leaves a
+        // minimal source-tagged line here, at actual execution time, so future audits see them
+        // in the dump itself.
+        if (held.Result == null)
+            DecisionDumper.WriteNonPolicy(held.Ctx, held.Cmd, held.Source ?? "auto-advance");
+
+        // The pacing tier for the NEXT decision keys off the surface this one acted on.
+        _lastCommittedSurfaceKey = SurfaceKey(held.Ctx);
 
         try
         {
@@ -156,34 +172,34 @@ public static class BotController
 
     /// <summary>
     /// The single seam between "the loop chose a command" and "the game performs it". All six
-    /// execution sites route here. Previewing: hold the command (and log the refresh — the
-    /// evidence, per the spec's verification section, that inference is state-driven rather
-    /// than timer-driven). Normal: execute immediately, exactly as before this feature.
+    /// execution sites route here. Previewing: hold the command for Step. Otherwise: hold it
+    /// for the per-kind pacing dwell (2026-08-20 UX pacing spec §1), or commit immediately
+    /// when the dwell is zero (DecisionSpeed = Instant, or an undwelled kind).
     /// </summary>
     private static void Dispatch(
         ReplayCommand cmd, DecisionKind kind, DecisionContext ctx,
         ActionMap? map, ObsResult? obs, PolicyResult? result, Func<bool>? commitGate = null,
         string? source = null)
     {
+        var pending = new PendingAction(cmd, kind, ctx, map, obs, result,
+                                        BuildDecisionKey(ctx), commitGate, source);
+
         if (_previewing)
         {
-            _pending = new PendingAction(cmd, kind, ctx, map, obs, result,
-                                         BuildDecisionKey(ctx), commitGate);
+            _pending = pending;
             GD.Print($"[SpireBot] BotController: preview refreshed: {cmd.Describe()}");
             return;
         }
 
-        // 2026-08-20 audit lesson: fallback/interstitial actions used to bypass decisions.jsonl
-        // entirely, so a dump could look perfectly faithful while the session log carried ~50
-        // silent non-policy actions. Every non-policy dispatch (result == null) now leaves a
-        // minimal source-tagged line so future audits see them in the dump itself. (Preview
-        // commits are exempt — a held preview is visible on the overlay while it's held.)
-        if (result == null)
-            DecisionDumper.WriteNonPolicy(ctx, cmd, source ?? "auto-advance");
+        double dwell = PacingPlan.DwellSeconds(
+            kind, SurfaceKey(ctx) != _lastCommittedSurfaceKey, SpireBotConfig.DecisionSpeed);
+        if (dwell <= 0.0)
+        {
+            Commit(pending);
+            return;
+        }
 
-        // Non-preview: selection-time side effects (TryBeginAutoAdvance) already ran inline at
-        // the call site, and the dump already ran in DispatchWithFallback — commitGate unused.
-        ActionExecutor.Execute(cmd, kind);
+        ArmDwell(pending, dwell);
     }
 
     /// <summary>The single definition of "the decision loop is currently held", used by both
@@ -206,7 +222,7 @@ public static class BotController
     private sealed record PendingAction(
         ReplayCommand Cmd, DecisionKind Kind,
         DecisionContext Ctx, ActionMap? Map, ObsResult? Obs, PolicyResult? Result,
-        string Key, Func<bool>? CommitGate);
+        string Key, Func<bool>? CommitGate, string? Source = null);
 
     private static PendingAction? _pending;
 
@@ -406,6 +422,11 @@ public static class BotController
         Paused = false;
         Paused = startPaused;
 
+        // No dwell from a previous run may survive into this one.
+        _dwellArmed = false;
+        _dwellSeq++;
+        _lastCommittedSurfaceKey = null;
+
         // The vendored dispatcher fast-forwards a replay (_gameSpeed defaults to 2.0) and
         // re-asserts it whenever IsActive is true, which BotDriving now makes permanent. Pin it
         // so a bot run doesn't silently double-speed the game — and so a run that starts paused
@@ -495,6 +516,8 @@ public static class BotController
         _running = false;
         ReplayEngine.BotDriving = false;
         Paused = false;
+        _dwellArmed = false;
+        _dwellSeq++;
         // A purchase in flight when the loop stops must not hold the next run's first decision.
         ShopPurchaseGate.Reset();
         // BotDriving going false makes ReplayEngine.IsActive false, after which nothing re-asserts
@@ -690,6 +713,10 @@ public static class BotController
         // so a step armed mid-flight survives to the next cycle instead of being silently spent.
         if (ReplayEngine.HasPendingCommand) return;
 
+        // A chosen action is dwelling — the decision is already made and the user is being
+        // shown it. Deciding again would overwrite the held action mid-countdown.
+        if (_dwellArmed) return;
+
         // A dispatched shop purchase reports Ok as soon as it is STARTED, so the pending-command
         // check above goes false while the game is still resolving it — during which the item is
         // still on the shelf and the gold still unspent. Deciding in that window bought the same
@@ -761,6 +788,55 @@ public static class BotController
 
     /// <summary>Whether a <see cref="ScheduleRecheck"/> timer is already outstanding.</summary>
     private static bool _recheckPending;
+
+    // ── Decision pacing (2026-08-20 UX pacing spec §1) ──────────────────────────────────────
+    //
+    // decide → announce → dwell → commit. A chosen action is HELD in _pending (the preview
+    // feature's cache — the overlay's "Will take: ..." line is the announce) while an unscaled
+    // timer runs, then Commit executes it. SceneTreeTimers cannot be cancelled, so _dwellSeq is
+    // the cancellation: anything that invalidates a held action (Stop, BeginDriving, unpause)
+    // bumps it, and a firing timer with a stale captured seq is a no-op.
+    private static bool _dwellArmed;
+    private static int _dwellSeq;
+
+    /// <summary>The surface the last COMMITTED action was chosen on. A decision on a different
+    /// surface gets the longer "reading" dwell; same surface gets the between-actions dwell.</summary>
+    private static string? _lastCommittedSurfaceKey;
+
+    private static string SurfaceKey(DecisionContext ctx)
+        => $"{ctx.Kind}::{ctx.Snapshot.RoomType}::{ctx.Snapshot.Floor}";
+
+    private static void ArmDwell(PendingAction pending, double seconds)
+    {
+        var tree = NGame.Instance?.GetTree();
+        if (tree == null)
+        {
+            // No tree, no timer — degrade to the pre-pacing instant behavior rather than stall.
+            Commit(pending);
+            return;
+        }
+
+        _pending = pending;
+        _dwellArmed = true;
+        int seq = ++_dwellSeq;
+        GD.Print($"[SpireBot] BotController: dwelling {seconds:0.00}s before '{pending.Cmd.Describe()}'.");
+        // ignoreTimeScale: decision pacing must be independent of Engine.TimeScale (the
+        // GameSpeed setting) — the whole point of DecisionSpeed being a separate knob.
+        tree.CreateTimer(seconds, processAlways: true, processInPhysics: false, ignoreTimeScale: true)
+            .Connect("timeout", Callable.From(() => OnDwellElapsed(seq)));
+    }
+
+    private static void OnDwellElapsed(int seq)
+    {
+        if (seq != _dwellSeq) return;   // superseded by Stop/BeginDriving/unpause — dead timer
+        _dwellArmed = false;
+        if (!_running) return;
+        var held = _pending;
+        if (held == null) return;       // Step already committed it
+        if (_paused) return;            // paused mid-dwell: keep it as a held preview for Step
+        _pending = null;
+        Commit(held);
+    }
 
     private static void OnHeartbeat()
     {
@@ -889,12 +965,11 @@ public static class BotController
         // goes false and this falls through to the normal chain below on the very next decision.
         var cardClaim = ctx.Available.OfType<ClaimRewardCommand>()
             .FirstOrDefault(RewardClaimMemory.IsPendingCardClaim);
-        // Previewing selects via the read-only probe and defers the REAL TryBeginAutoAdvance
-        // (which mutates the loop-backstop counter) to commit time via the CommitGate — see
-        // the spec's "Where the hold goes". Non-preview: inline, exactly as before.
-        if (cardClaim != null &&
-            (_previewing ? RewardClaimMemory.CanAutoAdvance(cardClaim)
-                         : RewardClaimMemory.TryBeginAutoAdvance(cardClaim)))
+        // Probe read-only at decide time in EVERY mode; the mutating TryBeginAutoAdvance is
+        // the commit gate, running when the action actually executes (immediately when the
+        // dwell is zero, after the dwell otherwise, on Step while paused). Previously only
+        // the preview path deferred; the dwell pipeline makes deferral the universal rule.
+        if (cardClaim != null && RewardClaimMemory.CanAutoAdvance(cardClaim))
         {
             GD.Print($"[SpireBot] BotController: auto-advancing interstitial step " +
                      $"({cardClaim.Describe()}) — no RL action id models it.");
@@ -1003,10 +1078,6 @@ public static class BotController
                         $"(available={available}) — waiting for the next settle signal.");
             return;
         }
-
-        // Deferred to Commit while previewing, so dumps record only actions actually taken.
-        if (obs != null && !_previewing)
-            DecisionDumper.Write(ctx, obs, map, result);
 
         try
         {
