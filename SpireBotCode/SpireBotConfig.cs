@@ -43,6 +43,19 @@ public class SpireBotConfig : SimpleModConfig
     public static float GameSpeed { get; set; } = 1.0f;
 
     /// <summary>
+    /// Bot decision-speed multiplier (2026-08-20 UX pacing spec §2): divides the per-kind
+    /// dwell the bot holds each chosen action for before committing it, so the user can see
+    /// what it is about to do. 10 means Instant — no dwell at all, the pre-pacing behavior
+    /// for hands-off grind runs. Controls DECISION pacing only; it never touches
+    /// Engine.TimeScale / game speed (that is <see cref="GameSpeed"/>, config-screen only).
+    /// The overlay's ◀/▶ buttons (BotControlBar) write this live and save it debounced.
+    /// Range and step must keep covering every SpeedLadder.BotSteps rung — PacingSelfTest
+    /// asserts that.
+    /// </summary>
+    [ConfigSlider(0.5, 10, 0.5)]
+    public static float DecisionSpeed { get; set; } = 1.0f;
+
+    /// <summary>
     /// When true (the default), a bot run begins paused: the bot never acts on its own, and the
     /// overlay shows the action it would take, so a human can play the run manually with the
     /// policy as an advisor. Press Play on the overlay to hand the run over to the bot at any
