@@ -40,6 +40,52 @@ internal static class StuckRecovery
 
     internal static void Reset() => _blockedTicks = 0;
 
+    /// <summary>
+    /// The completion path for a card/potion play that ENDS the combat — wired to
+    /// <c>CombatManager.CombatEnded</c> in <see cref="BotController"/>'s combat hooks.
+    ///
+    /// 2026-08-20 audit issue 3 (root cause, run JKZ3B820B6 — 5/5 StuckRecovery firings):
+    /// the vendored clear for <see cref="ReplayState.CardPlayInFlight"/> lives in
+    /// <c>CardPlayReplayPatch.OnAfterActionExecuted</c>'s <c>if (action is PlayCardAction)</c>
+    /// branch, and for the killing blow that branch demonstrably never runs — once the lethal
+    /// damage resolves, the game's win-condition/teardown path owns the action queue
+    /// (CombatManager.CheckWinCondition → EndCombatInternal, CombatManager.cs:1046-1059) and
+    /// the dispatched PlayCardAction's completion event never reaches the patch (either it
+    /// fires for intermediate teardown actions only, or the action ends Canceled instead of
+    /// Finished, which suppresses AfterActionExecuted entirely — ActionExecutor.cs:219).
+    /// The semantic fast path below can never cover this either: it requires
+    /// <c>!IsOverOrEnding</c>, which is false by definition in exactly this scenario. So the
+    /// combat-end transition IS the missing completion signal — once combat is over, no
+    /// card/potion completion can ever arrive, and every queued combat-scoped command
+    /// (PlayCard/EndTurn) is permanently undispatchable (GetDispatchableTypes only offers them
+    /// while <c>IsInProgress && Phase == Play</c>). Handling it here, event-driven, replaces
+    /// the 3-4s of dead time per lethal play (plus the separate 5s stale-queue drop for the
+    /// recorded follow-up EndTurn) with an immediate, designed hand-off to the rewards screen.
+    /// </summary>
+    internal static void OnCombatEnded()
+    {
+        bool droppedAny = ActionExecutor.DropCombatScopedCommands();
+
+        bool hadFlags = ReplayState.CardPlayInFlight
+                        || ReplayState.PotionInFlight
+                        || CardPlayReplayPatch.IsAwaitingEndTurnCompletion;
+        if (hadFlags)
+        {
+            GD.Print("[SpireBot] StuckRecovery: combat ended with in-flight state still set " +
+                     $"({Describe()}) — completing it now (the killing play's completion hook " +
+                     "cannot fire once teardown starts; CombatManager.CombatEnded is its real " +
+                     "completion signal).");
+            ReplayState.CardPlayInFlight = false;
+            ReplayState.PotionInFlight = false;
+            CardPlayReplayPatch._dispatching = false;
+            CardPlayReplayPatch.ClearEndTurnGate();
+            _blockedTicks = 0;
+        }
+
+        if (hadFlags || droppedAny)
+            ReplayDispatcher.DispatchNow();
+    }
+
     /// <summary>Called once per heartbeat tick while a bot run is in progress.</summary>
     internal static void Tick()
     {
@@ -64,6 +110,25 @@ internal static class StuckRecovery
             ReplayState.CardPlayInFlight = false;
             ReplayState.PotionInFlight = false;
             CardPlayReplayPatch._dispatching = false;
+            _blockedTicks = 0;
+            return;
+        }
+
+        // Second semantic fast path (2026-08-20 audit issue 3, defense-in-depth behind
+        // OnCombatEnded's event-driven clear): a card play only ever happens inside a combat,
+        // so CardPlayInFlight (or the end-turn gate) set while NO combat is running means the
+        // completion can never arrive — clear within one heartbeat instead of the 5s timeout.
+        // PotionInFlight is deliberately NOT cleared here: out-of-combat potion use is
+        // legitimate and its completion path works; OnCombatEnded covers the lethal-potion case.
+        if (CombatIsOver()
+            && (ReplayState.CardPlayInFlight || CardPlayReplayPatch.IsAwaitingEndTurnCompletion))
+        {
+            GD.Print("[SpireBot] StuckRecovery: card-play in-flight state set with no combat " +
+                     $"running ({Describe()}) — clearing it (its completion can never arrive; " +
+                     "OnCombatEnded should normally have caught this).");
+            ReplayState.CardPlayInFlight = false;
+            CardPlayReplayPatch._dispatching = false;
+            CardPlayReplayPatch.ClearEndTurnGate();
             _blockedTicks = 0;
             return;
         }
@@ -112,6 +177,14 @@ internal static class StuckRecovery
 
         return CardPlayReplayPatch.ResolveLocalPlayer()?.PlayerCombatState?.Phase
                == PlayerTurnPhase.Play;
+    }
+
+    /// <summary>No combat is running (or one is in teardown) — the state in which no card-play
+    /// completion event can ever arrive (see <see cref="OnCombatEnded"/>).</summary>
+    private static bool CombatIsOver()
+    {
+        var combat = CombatManager.Instance;
+        return combat == null || !combat.IsInProgress || combat.IsOverOrEnding;
     }
 
     private static bool Blocked()

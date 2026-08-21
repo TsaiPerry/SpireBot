@@ -57,6 +57,27 @@ public class ClaimRewardCommand : ReplayCommand
         }
 
         var (button, reward) = buttons[RewardIndex];
+
+        // SpireBot delta 18 (2026-08-20 audit issue 1): state-level affordance gate, form (2)
+        // of the "abide by the game's rules" rule (see Affordance.RewardViewingActive's doc).
+        // The game NEVER frees a terminal NRewardsScreen, so its buttons stay enumerable and
+        // clickable-looking after RewardsSetSynchronizer's rewardsStack was already popped
+        // (set completed / skipped / BeforeLeavingRoom on a room exit) — invoking GetReward()
+        // then throws "Tried to sync reward for local player, but they are not currently
+        // viewing any reward set!" inside TaskHelper's swallowed task, and the claim silently
+        // no-ops while looking executed (observed live: JKZ3B820B6 godot.log:7774, an
+        // auto-advance claim fired during the act transition). Refuse loudly instead: a claim
+        // that did not execute must never look like it did — RewardClaimMemory only records
+        // declines on a real TakeCard-skip dispatch, so refusing here records nothing.
+        if (!SpireBot.SpireBotCode.Affordance.RewardClaimWouldLand(reward))
+        {
+            Godot.GD.PrintErr($"[SpireBot] ClaimRewardCommand: refusing reward [{RewardIndex}] " +
+                              $"({reward.GetType().Name}) — the local player is not viewing this " +
+                              "reward set (its rewardsStack entry was already popped), so the click " +
+                              "would throw inside a swallowed task and silently no-op.");
+            return ExecuteResult.Ok();
+        }
+
         InvokeGetReward(button);
         PlayerActionBuffer.LogDispatcher(
             $"[ClaimReward] Claimed reward [{RewardIndex}] ({reward.GetType().Name}).");

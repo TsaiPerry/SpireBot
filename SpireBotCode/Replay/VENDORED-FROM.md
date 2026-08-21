@@ -179,6 +179,160 @@
     observed live, so that's the full `count` == this screen's `MaxSelect`). Purely
     additive — no existing vendored method's behavior changed.
 
+16. **`TakeChestRelicCommand.Execute` gained a chest-must-be-open refusal** (2026-08-16,
+    live-bot fix). *Why:* `Affordance.RelicPickingActive()` (delta from Task 16) mirrors the
+    backend precondition, but the backend accepts a pick from ROOM ENTRY —
+    `TreasureRoom.Enter` calls `BeginRelicPicking()` when the room loads
+    (`TreasureRoom.cs:47`), before the chest opens. A pre-open pick then executes and crashes
+    the game's own treasure UI (`NTreasureRoomRelicCollection.AnimateRelicAwards` runs
+    `First()` over relic nodes only the open animation creates), wedging the room — observed
+    live in run SXFY52G6VQ (act1 floor9) when the policy sampled Take before Open. A real
+    player is physically held to open-first because the relic buttons don't exist yet; the
+    delta refuses the pick while the `%Chest` button is still clickable, mirroring that.
+    `ActionMap.BuildRewardScreen` gates its "Take chest relic" mapping the same way
+    (non-vendored side of the same fix). Recorded replays are unaffected — recordings always
+    carry OpenChest before TakeChestRelic.
+
+17. **`SelectGridCardCommand.Execute` gained the game's own overlay-close step, and
+    `ChooseRestSiteOptionCommand.Execute` gained a button-affordance refusal**
+    (2026-08-16, live-bot fix). *Why:* run SXFY52G6VQ (act0 floor12) showed the decision
+    dump alternating `Rest:Smith`→`SelectCards` eight times at a constant hp of 0.84; the
+    save (`floor_23/run.save`) recorded only two real upgrades (TWIN_STRIKE,
+    DRAMATIC_ENTRANCE, both `current_upgrade_level=1`) — attempts 3-8 opened a select screen
+    and minted nothing, and the loop only ended when a 3%-probability Heal was sampled
+    instead of Smith. Root cause, found by comparing `SelectGridCardCommand.Execute`
+    against the game's own single-select confirm path
+    (`NDeckUpgradeSelectScreen.CheckIfSelectionComplete:248-257`,
+    `Core/Nodes/Screens/CardSelection/NDeckUpgradeSelectScreen.cs`): the real game pairs
+    `_completionSource.SetResult(...)` with `NOverlayStack.Instance.Remove(this)`
+    (`Core/Nodes/Screens/Overlays/NOverlayStack.cs`) in the same handler — removing the
+    screen from the overlay stack is not a side effect, it *is* how the screen closes.
+    `SelectGridCardCommand.Execute` only did the reflection-based
+    `CardGridScreenCapture.ConfirmSelection` (`tcs.TrySetResult(cards)`) half of that pair,
+    so the `NDeckUpgradeSelectScreen` instance stayed on the overlay stack as a ghost after
+    every Smith pick. **Fix A** (`SelectGridCardCommand.cs:53-65`): after
+    `ConfirmSelection`, defer a call that mirrors the game's own close — validity-check the
+    screen, then `NOverlayStack.Instance?.Remove(screen)` — before clearing
+    `CardGridScreenCapture.ActiveScreen`. `NOverlayStack` lives in
+    `MegaCrit.Sts2.Core.Nodes.Screens.Overlays` (not the `...Core.Nodes` namespace the
+    brief's starting hypothesis guessed); `NCardGridSelectionScreen : Control,
+    IOverlayScreen, ...` (`NCardGridSelectionScreen.cs:28`) so the captured `screen` value
+    can be passed to `Remove(IOverlayScreen)` directly, no cast needed. Research answers for
+    the record (`RestSiteSynchronizer.cs`, `NRestSiteRoom.cs`): (1) yes —
+    `RestSiteSynchronizer.ChooseOption` (`:123-153`) only calls `restSite.options.RemoveAt`
+    /`.Clear()` for the chosen option when `option.OnSelect()` returns `true`; every other
+    surviving option (and, if `OnSelect()` returns `false`, the chosen one too) stays in the
+    list `GetLocalOptions()` returns, and `SmithRestSiteOption.OnSelect`
+    (`Core/Entities/RestSite/SmithRestSiteOption.cs:56-74`) returns `false` whenever the
+    resolved selection is empty — so a still-listed, still-`IsEnabled`
+    (`Deck.UpgradableCardCount != 0`) SMITH option is exactly what the dispatcher's rest
+    enumeration (`ReplayDispatcher.cs:221-227`, which calls `sync.GetLocalOptions()`
+    directly) can re-offer while a prior Smith pick's screen is still an unresolved ghost
+    behind a newer one; (2) `NRestSiteRoom.AfterSelectingOption` (`:176-179`) just forwards
+    to `AfterSelectingOptionAsync` (`:363-379`), which plays VFX, calls
+    `UpdateRestSiteOptions()` to rebuild one `NRestSiteButton` per option still in
+    `Options` (`== _room.Options == sync.GetLocalOptions()`, confirmed in
+    `Core/Rooms/RestSiteRoom.cs:23` — there is no second options list to desync from), and
+    re-shows the choices container; our deferred call at
+    `ChooseRestSiteOptionCommand.cs:76` doesn't itself throw or fail silently, but it races
+    the SAME ghost-overlay problem — the room happily rebuilds and re-enables its buttons
+    underneath an overlay stack whose top is still the unclosed screen, so nothing in the
+    UI layer stops a second dispatch from targeting the newly-rebuilt (or still-there)
+    SMITH button; (3) attempts 3-8 opened real, distinct `NDeckUpgradeSelectScreen`
+    instances (the Harmony capture patch fires per-instance on `CardsSelected`) and a real
+    `SelectGridCard` decision was recorded for each, but `SmithRestSiteOption.OnSelect`
+    calls `CardCmd.Upgrade(item, ...)` on whichever card the bot's deterministic policy
+    picked at that grid index; once the two genuinely-upgradable candidates the policy
+    favors at hp 0.84 were already smithed by attempts 1-2, later attempts kept re-selecting
+    an already-upgraded (or otherwise non-upgradable) card at the same index, so the click
+    round-tripped through a real screen but `CardCmd.Upgrade` had nothing left to do —
+    consistent with "opened select screens but applied no upgrade" while `IsEnabled`
+    (`UpgradableCardCount != 0`, driven by the rest of the deck) kept SMITH selectable.
+    **Fix B** (`ChooseRestSiteOptionCommand.cs`, defense-in-depth, same shape as delta 16's
+    chest-button gate) went through two revisions. **Revision 1** (initial) checked
+    `Affordance.IsLive` on the option's `NRestSiteButton` but then dispatched by calling
+    `RestSiteSynchronizer.ChooseLocalOption` directly (the pre-existing mechanism) — review
+    caught that this never observes the race it claims to guard: the *only* code that
+    disables rest-site buttons is `NRestSiteButton.SelectOption` (`:139-171`), reached
+    exclusively from the button's own `OnRelease()` override (`:130-137`), which a direct
+    synchronizer call never goes through. So during the exact ghost-overlay window Fix A
+    closes, `IsEnabled` was still `true` and the check let the dispatch through anyway — the
+    only case it actually caught (option already removed from `Options`) was already caught
+    by the preceding null-lookup retry. **Revision 2** (current, `ChooseRestSiteOptionCommand.
+    cs:56-73`) fixes this by driving the button's own click path instead of the synchronizer:
+    after the `Affordance.CheckOrRefuse` gate passes, it calls `button.ForceClick()`
+    (`NClickableControl.cs:255-259`, "Used by AutoSlay for automated testing") rather than
+    `EmitSignal(Released, ...)` the way delta 16's chest/proceed buttons are driven — those
+    are wired via an external `.Connect(SignalName.Released, ...)` subscriber, but
+    `NRestSiteButton` never `Connect`s one, so a raw `Released` emit does nothing here;
+    `SelectOption` only runs from `OnRelease()`, which only a real click or `ForceClick()`
+    invokes. `ForceClick()` calls `OnRelease()` synchronously, which calls
+    `TaskHelper.RunSafely(SelectOption(Option))`; `SelectOption`'s async body runs
+    synchronously up to its first `await`, and `NRestSiteRoom.DisableOptions()` sits before
+    that `await` (`:146-147`), so by the time `ForceClick()` returns to `Execute()` every
+    rest-site button — including the one just clicked — already has `IsEnabled == false`.
+    This makes the affordance check load-bearing: a second dispatch landing in the same
+    window now sees a genuinely disabled button and is refused, where revision 1 would have
+    let it through. `SelectOption` also performs the identical
+    `RestSiteSynchronizer.ChooseLocalOption(...)` call and, on success, the identical
+    `NRestSiteRoom.AfterSelectingOption(option)` call this command used to make by hand — so
+    the multiplayer message-send path (`ChooseLocalOption` → `OptionIndexChosenMessage` via
+    `_netService.SendMessage`) is unchanged; only the gating and error-recovery
+    (`SelectOption`'s `finally` re-enables options on failure, which the hand-written version
+    didn't do either) now come from the game's own vetted code instead of being partially
+    reimplemented. Both fixes now coexist: Fix A closes the hole that let a second Smith
+    dispatch reach a live button in the first place; Fix B (revision 2) refuses it — for real,
+    against actually-observed `IsEnabled` state — even if Fix A is somehow bypassed or a
+    future option type has the same `OnSelect`-returns-`false` shape as Smith's. A recorded
+    replay never exercised either bug — it only ever contains clicks/confirms a real player
+    made, which already obey the game's UI gating (including the disable/enable this
+    revision now drives through), so recorded-replay playback masked this the same way it
+    masked the chest bug in delta 16.
+
+    **Fix C** (`ChooseRestSiteOptionCommand.cs`, added 2026-08-16 final-review pass, third
+    guard): the button-affordance gate (Fix B) checks `NClickableControl.IsEnabled`, which is
+    driven only by `NRestSiteRoom.DisableOptions()`/`EnableOptions()` — it says nothing about
+    whether the chosen *option itself* is usable. `RestSiteOption.IsEnabled`
+    (`Core/Entities/RestSite/RestSiteOption.cs:37`, e.g.
+    `SmithRestSiteOption.IsEnabled => Deck.UpgradableCardCount != 0`, or Cook's `>=2` removable
+    requirement) is instead snapshotted once into `NRestSiteButton._isUnclickable` at
+    `NRestSiteButton.Create` (`:~107`) and checked inside the button's own `OnRelease()`
+    override (`if (!_isUnclickable)`) — a layer *below* where `Affordance.IsLive` looks.
+    `ReplayDispatcher.cs:221-227` enumerates every `sync.GetLocalOptions()` entry with no
+    `IsEnabled` filter, so a policy naming an option on a deck with nothing left to
+    smith/remove sails past Fix B's gate, reaches `ForceClick()` → `OnRelease()`, and silently
+    no-ops on the `_isUnclickable` check — `Execute()` still returns `Ok()`, the room re-offers
+    the same dead option, and a live policy can loop on it indefinitely (the pre-Fix-B direct
+    `ChooseLocalOption` dispatch executed regardless of `IsEnabled`, so this is a regression
+    class delta 17 exists to eliminate, not a pre-existing one). Fix: check
+    `chosenOption.IsEnabled` before the button lookup / `CheckOrRefuse` gate and refuse with the
+    same log-and-`Ok()` idiom used throughout this file and `TreasureCommands.cs` — the
+    dispatcher does not treat the option as consumed, so it re-decides on the next tick instead
+    of believing a real click landed.
+
+18. **`ClaimRewardCommand.Execute()` gained a state-level "is the local player actually viewing
+    this reward set" refusal** (2026-08-20, live-run-audit fix — issue 1 of
+    `PROMPT-fix-live-gaps-20260820.md`). *Why:* the game keeps a terminal `NRewardsScreen`
+    alive forever (showcase bug 2's root fact — `RunManager.ProceedFromTerminalRewardsScreen`
+    only opens the map), so its `NRewardButton`s stay enumerable and Affordance-live after
+    `RewardsSetSynchronizer` already popped the set's `rewardsStack` entry (set completed,
+    skipped, or `BeforeLeavingRoom()` on a room exit — `RewardsSetSynchronizer.cs:317/344/400`).
+    Invoking `GetReward()` on such a button reaches `SelectLocalReward`, which throws
+    `"Tried to sync reward for local player, but they are not currently viewing any reward
+    set!"` (`RewardsSetSynchronizer.cs:201-203`) **inside `TaskHelper`'s swallowed task** — the
+    command still returns `Ok()`, so the claim silently no-ops while looking executed (observed
+    live: run JKZ3B820B6, godot.log:7774, an auto-advance claim fired during the act-1→act-2
+    transition). "Viewing" has no public predicate — it is implicitly
+    `GetRewardStateForPlayer(LocalPlayer).rewardsStack.Count > 0`, established synchronously by
+    `BeginRewardsSet` before the screen even exists (`RewardsSet.cs:161` vs `:192`) — so the
+    delta re-applies the game's own precondition via the publicized private members
+    (`Affordance.RewardClaimWouldLand`: viewing active AND the clicked button's `Reward` is on
+    the TOP stack entry, because `SelectLocalReward` always operates on `rewardsStack.Last()`)
+    and refuses with the standard log-and-`Ok()` idiom. Same "state-level precondition" form
+    as the treasure-relic gate (stall #10) and delta 16's chest. The mask/auto-advance layers
+    (`ActionMap.BuildRewardScreen`, `RewardClaimMemory.IsPendingCardClaim`) apply the same
+    predicate SpireBot-side, so this refusal is defense-in-depth, not the primary gate.
+
 ## Maintenance rule
 
 Phase 5 grind fixes that touch vendored logic must be applied here AND noted in this file (and optionally mirrored to the local RunReplays fork).

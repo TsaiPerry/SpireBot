@@ -162,7 +162,8 @@ public static class BotController
     /// </summary>
     private static void Dispatch(
         ReplayCommand cmd, DecisionKind kind, DecisionContext ctx,
-        ActionMap? map, ObsResult? obs, PolicyResult? result, Func<bool>? commitGate = null)
+        ActionMap? map, ObsResult? obs, PolicyResult? result, Func<bool>? commitGate = null,
+        string? source = null)
     {
         if (_previewing)
         {
@@ -171,6 +172,14 @@ public static class BotController
             GD.Print($"[SpireBot] BotController: preview refreshed: {cmd.Describe()}");
             return;
         }
+
+        // 2026-08-20 audit lesson: fallback/interstitial actions used to bypass decisions.jsonl
+        // entirely, so a dump could look perfectly faithful while the session log carried ~50
+        // silent non-policy actions. Every non-policy dispatch (result == null) now leaves a
+        // minimal source-tagged line so future audits see them in the dump itself. (Preview
+        // commits are exempt — a held preview is visible on the overlay while it's held.)
+        if (result == null)
+            DecisionDumper.WriteNonPolicy(ctx, cmd, source ?? "auto-advance");
 
         // Non-preview: selection-time side effects (TryBeginAutoAdvance) already ran inline at
         // the call site, and the dump already ran in DispatchWithFallback — commitGate unused.
@@ -232,6 +241,7 @@ public static class BotController
     private static Action<CombatState>? _turnStartedHandler2;
     private static Action<CombatState>? _turnEndedHandler2;
     private static Action<CombatState>? _combatSetUpHandler;
+    private static Action<MegaCrit.Sts2.Core.Rooms.CombatRoom>? _combatEndedHandler;
 
     // Stuck guard: if the same decision (kind + available commands + a few state scalars)
     // recurs this many times in a row with no state change, force a fallback action instead
@@ -421,6 +431,61 @@ public static class BotController
         // nothing ever invokes ReplayDispatcher.Reset() and the subscription never happens
         // (round 3 fix — see VENDORED-FROM.md delta 9).
         ReplayDispatcher.Reset();
+
+        // Must come AFTER the Reset() above, which just wiped every ReplayState capture — see
+        // the method doc for why an attach can land inside a room whose capture patches have
+        // already fired and will never fire again.
+        RecaptureOpenRoomState();
+    }
+
+    // Same private-State reflection convention as RunObsWriter/PassiveDump — no shared helper
+    // exists for it in this codebase.
+    private static readonly System.Reflection.PropertyInfo? RunStateProp =
+        typeof(RunManager).GetProperty(
+            "State",
+            System.Reflection.BindingFlags.Public
+            | System.Reflection.BindingFlags.NonPublic
+            | System.Reflection.BindingFlags.Instance);
+
+    /// <summary>
+    /// Repopulates the ReplayState captures for a room that was ALREADY open when the driver
+    /// attached. The vendored capture patches fire once, at the moment a room's synchronizer
+    /// begins (<c>EventSynchronizer.BeginEvent</c> runs inside <c>EventRoom.EnterInternal</c>,
+    /// BEFORE <c>RunManager.RoomEntered</c> is raised) — so when <see cref="AttachToRun"/> fires
+    /// off that same RoomEntered signal, the capture has already happened and the
+    /// <c>ReplayDispatcher.Reset()</c> in <see cref="BeginDriving"/> just erased it. Nothing
+    /// re-fires for a still-open room, so without this the decision loop enumerates zero
+    /// commands forever (observed: a fresh run's Ancient/Neow bonus stuck on "Unsupported
+    /// decision with zero available commands" while the overlay showed "&lt;none yet&gt;").
+    ///
+    /// Reads the same live <c>RunManager</c> properties the capture patches cache, guarded by
+    /// the current room's type so a synchronizer left over from a previous room can never be
+    /// misattributed. StartBotRun is unaffected either way: it resets BEFORE the run exists
+    /// (no current room), and the new run's patches then fire in the normal order.
+    /// </summary>
+    private static void RecaptureOpenRoomState()
+    {
+        var manager = RunManager.Instance;
+        if (manager == null)
+            return;
+
+        var state = RunStateProp?.GetValue(manager) as IRunState;
+        var room = state?.CurrentRoom;
+
+        if (room is MegaCrit.Sts2.Core.Rooms.EventRoom
+            && manager.EventSynchronizer is { } eventSync && eventSync.Events.Count > 0)
+        {
+            ReplayState.ActiveEventSynchronizer = eventSync;
+            GD.Print("[SpireBot] BotController: re-captured the open event room's " +
+                     "EventSynchronizer (its BeginEvent fired before the driver attached).");
+        }
+        else if (room is MegaCrit.Sts2.Core.Rooms.RestSiteRoom
+                 && manager.RestSiteSynchronizer is { } restSync)
+        {
+            ReplayState.ActiveRestSiteSynchronizer = restSync;
+            GD.Print("[SpireBot] BotController: re-captured the open rest site's " +
+                     "RestSiteSynchronizer (its BeginRestSite fired before the driver attached).");
+        }
     }
 
     /// <summary>Stops the bot decision loop. Does not end the in-progress run — it just stops
@@ -456,9 +521,17 @@ public static class BotController
         _turnStartedHandler2 = state => _session.OnTurnStarted(state);
         // Round-15: round-boundary damage recompute — see SessionState.OnTurnEnded.
         _turnEndedHandler2 = state => _session.OnTurnEnded(state);
+        // 2026-08-20 audit issue 3: the killing-blow card play's completion hook
+        // (CardPlayReplayPatch.OnAfterActionExecuted's PlayCardAction branch) never runs once
+        // combat teardown starts, so CardPlayInFlight stayed stuck for the 5s hard timeout on
+        // every lethal play (5/5 StuckRecovery firings in run JKZ3B820B6 were exactly this).
+        // CombatManager.CombatEnded IS the completion signal for that final play — see
+        // StuckRecovery.OnCombatEnded.
+        _combatEndedHandler = _ => StuckRecovery.OnCombatEnded();
         mgr.CombatSetUp += _combatSetUpHandler;
         mgr.TurnStarted += _turnStartedHandler2;
         mgr.TurnEnded += _turnEndedHandler2;
+        mgr.CombatEnded += _combatEndedHandler;
         _combatHooksSubscribed = true;
     }
 
@@ -471,8 +544,10 @@ public static class BotController
             if (_combatSetUpHandler != null) mgr.CombatSetUp -= _combatSetUpHandler;
             if (_turnStartedHandler2 != null) mgr.TurnStarted -= _turnStartedHandler2;
             if (_turnEndedHandler2 != null) mgr.TurnEnded -= _turnEndedHandler2;
+            if (_combatEndedHandler != null) mgr.CombatEnded -= _combatEndedHandler;
         }
         _combatSetUpHandler = null;
+        _combatEndedHandler = null;
         _turnStartedHandler2 = null;
         _turnEndedHandler2 = null;
         _combatHooksSubscribed = false;
@@ -905,11 +980,22 @@ public static class BotController
             // Loud, because every occurrence is a mapping bug worth fixing, not a normal path.
             if (forceFallback && ctx.Available.Count > 0)
             {
-                var scripted = ctx.Available[0];
+                // Never a potion command (2026-08-20 audit issue 2: the first-available pick
+                // dispatched DiscardPotion 0 at a rest site) — a potion is always enumerable
+                // and never the way a stuck screen advances, so burning one here is pure loss.
+                var scripted = ctx.Available.FirstOrDefault(
+                    c => c is not UsePotionCommand and not DiscardPotionCommand);
+                if (scripted == null)
+                {
+                    GD.PrintErr($"[SpireBot] BotController: MAPPING GAP — kind={ctx.Kind} has no action id " +
+                                $"for any available command (available={available}), and only potion " +
+                                "commands are available — waiting rather than burning one.");
+                    return;
+                }
                 GD.PrintErr($"[SpireBot] BotController: MAPPING GAP — kind={ctx.Kind} has no action id " +
                             $"for any available command (available={available}); dispatching " +
                             $"'{scripted.Describe()}' as a scripted fallback to keep the run alive.");
-                Dispatch(scripted, ctx.Kind, ctx, map, obs, result: null);
+                Dispatch(scripted, ctx.Kind, ctx, map, obs, result: null, source: "mapping-gap");
                 return;
             }
 
@@ -983,21 +1069,29 @@ public static class BotController
             var rng = new Random();
             var chosen = crystalClicks[rng.Next(crystalClicks.Count)];
             GD.Print($"[SpireBot] BotController: Unsupported fallback — random Crystal Sphere click: {chosen}");
-            Dispatch(chosen, ctx.Kind, ctx, map, obs: null, result: null);
+            Dispatch(chosen, ctx.Kind, ctx, map, obs: null, result: null, source: "unsupported-fallback");
             return;
         }
 
-        // (2) First available command, whatever it is.
-        if (ctx.Available.Count > 0)
-        {
-            var first = ctx.Available[0];
-            GD.Print($"[SpireBot] BotController: Unsupported fallback — first available command: {first}");
-            Dispatch(first, ctx.Kind, ctx, map, obs: null, result: null);
+        // (2) A safe interstitial advance, if one exists. This used to be "first available
+        // command, whatever it is" — and the 2026-08-20 audit (issue 2) caught it dispatching
+        // DiscardPotion 0 at rest sites (the bot threw potions away) and UsePotion 0 mid-combat,
+        // because a transitional screen's only enumerable commands were the always-available
+        // potion ones. Every Unsupported state observed live is transitional (rest options
+        // resolving, a room exiting, an enemy turn): the auto-advance chain covers the ones
+        // with a real way forward (finished-event PROCEED, shop opens, proceed-to-map/act,
+        // pending card claims), and for the rest WAITING is strictly better than burning a
+        // resource — the next settle signal or heartbeat re-decides in under a second.
+        if (TryAutoAdvance(ctx))
             return;
-        }
 
-        // (3) Nothing at all — wait for the next settle cycle.
-        GD.Print("[SpireBot] BotController: Unsupported decision with zero available commands — waiting.");
+        // (3) Nothing safe to do — wait for the next settle cycle. Never dispatch a
+        // destructive command (UsePotion/DiscardPotion/SkipRewards/...) just to have acted.
+        GD.Print(ctx.Available.Count > 0
+            ? "[SpireBot] BotController: Unsupported decision with no safe fallback (available=" +
+              $"[{string.Join(",", ctx.Available.Select(c => c.GetType().Name))}]) — waiting rather " +
+              "than dispatching a destructive command."
+            : "[SpireBot] BotController: Unsupported decision with zero available commands — waiting.");
     }
 
     /// <summary>

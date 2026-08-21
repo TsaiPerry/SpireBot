@@ -56,6 +56,73 @@ internal static class Affordance
     }
 
     /// <summary>
+    /// True when the LOCAL player is currently viewing a reward set — the exact state-level
+    /// precondition <c>RewardsSetSynchronizer.SelectLocalReward</c> enforces
+    /// (src/Core/Multiplayer/Game/RewardsSetSynchronizer.cs:201: throws "Tried to sync reward
+    /// for local player, but they are not currently viewing any reward set!" whenever
+    /// <c>GetRewardStateForPlayer(LocalPlayer).rewardsStack.Count &lt;= 0</c>).
+    ///
+    /// "Viewing" has no public predicate and no explicit begin/end call: it is implicitly true
+    /// from <c>BeginRewardsSet</c>'s push (RewardsSetSynchronizer.cs:166, run synchronously from
+    /// <c>RewardsSet.Offer()</c> BEFORE the rewards screen even exists — RewardsSet.cs:161 vs
+    /// :192) until the set completes, is skipped, or <c>BeforeLeavingRoom()</c> force-clears the
+    /// whole stack on a room exit (RewardsSetSynchronizer.cs:317/344/400). That last writer is
+    /// the live trap: the game NEVER frees a terminal NRewardsScreen (showcase bug 2), so its
+    /// buttons stay enumerable and Affordance-live after the stack was already popped — clicking
+    /// one then throws inside the swallowed task (observed live: JKZ3B820B6 godot.log:7774,
+    /// a post-act-transition auto-advance claim). Same defect family as delta 16's chest
+    /// (control-level) and the treasure relic pick (state-level, stall #10): re-apply the game's
+    /// own precondition, form (2) of the "abide by the game's rules" rule.
+    ///
+    /// Private members (<c>GetRewardStateForPlayer</c>, <c>LocalPlayer</c>,
+    /// <c>PlayerRewardState.rewardsStack</c>) are reachable because the csproj publicizes the
+    /// whole sts2 assembly. Fail-closed: any surprise here means "do not click".
+    /// </summary>
+    internal static bool RewardViewingActive()
+    {
+        try
+        {
+            var sync = RunManager.Instance?.RewardsSetSynchronizer;
+            if (sync == null)
+                return false;
+            return sync.GetRewardStateForPlayer(sync.LocalPlayer).rewardsStack.Count > 0;
+        }
+        catch (System.Exception ex)
+        {
+            GD.PrintErr($"[SpireBot] Affordance.RewardViewingActive threw: {ex.Message} — fail-closed (false).");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// True when clicking <paramref name="reward"/>'s button right now would actually land:
+    /// the local player is viewing a reward set AND this reward belongs to the set on TOP of
+    /// the stack — <c>SelectLocalReward</c> always operates on <c>rewardsStack.Last()</c>
+    /// (RewardsSetSynchronizer.cs:205-207), so a reward from any other set would be silently
+    /// mis-selected against the wrong set rather than throwing.
+    /// </summary>
+    internal static bool RewardClaimWouldLand(object? reward)
+    {
+        try
+        {
+            if (reward is not MegaCrit.Sts2.Core.Rewards.Reward typed)
+                return false;
+            var sync = RunManager.Instance?.RewardsSetSynchronizer;
+            if (sync == null)
+                return false;
+            var stack = sync.GetRewardStateForPlayer(sync.LocalPlayer).rewardsStack;
+            if (stack.Count == 0)
+                return false;
+            return stack[stack.Count - 1].set.Rewards.Contains(typed);
+        }
+        catch (System.Exception ex)
+        {
+            GD.PrintErr($"[SpireBot] Affordance.RewardClaimWouldLand threw: {ex.Message} — fail-closed (false).");
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Logs and returns false when the control is not clickable — call sites use this to refuse
     /// the action instead of forcing it through.
     /// </summary>

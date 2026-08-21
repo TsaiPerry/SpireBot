@@ -98,7 +98,9 @@ public sealed partial class ThinkingOverlay : CanvasLayer
         var panel = new PanelContainer
         {
             AnchorLeft = 0, AnchorTop = 0, AnchorRight = 0, AnchorBottom = 0,
-            OffsetLeft = 8, OffsetTop = 8,
+            // Top offset clears the game's top-of-screen player strip (HP/gold/potions and the
+            // relic row) so the overlay never covers the relics.
+            OffsetLeft = 8, OffsetTop = 200,
         };
         var style = new StyleBoxFlat
         {

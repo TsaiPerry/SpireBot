@@ -448,7 +448,9 @@ public sealed class ActionMap
         const int RestHeal = 0, RestSmith = 1, RestLeave = 2;
         var choice = actions.Choice;
 
-        var options = ctx.Available.OfType<ChooseRestSiteOptionCommand>().ToList();
+        var options = ctx.Available.OfType<ChooseRestSiteOptionCommand>()
+            .Where(RestOptionIsClickable)
+            .ToList();
         var extras = new List<ChooseRestSiteOptionCommand>();
 
         foreach (var opt in options)
@@ -472,6 +474,51 @@ public sealed class ActionMap
             if (slot >= choice.Slots) break;
             map.Set(choice.Base + slot, extras[i], $"Rest: {extras[i].OptionId}");
         }
+    }
+
+    /// <summary>
+    /// Whether this rest option could actually be clicked by a real player RIGHT NOW — the
+    /// delta-17 "Minor symmetry gap" closed at mask level (2026-08-20 audit issue 2): both
+    /// execute-side guards (ChooseRestSiteOptionCommand.cs Fix B/C) already refuse, but a
+    /// refusal consumes the decision, degrades the next one to Unsupported, and the old
+    /// first-available fallback then did something destructive (DiscardPotion at a rest site).
+    /// Two layers, mirroring the execute-side pair exactly:
+    ///   1. the OPTION's own IsEnabled (Fix C's state-level gate — Smith with nothing to
+    ///      upgrade, Cook with &lt;2 removable cards);
+    ///   2. the BUTTON's live-click affordance (Fix B's control-level gate — NRestSiteRoom
+    ///      .DisableOptions() disables every button while an option resolves, and the buttons
+    ///      are also briefly dead while the room animates in; observed live as the double-Smith
+    ///      re-ask: the first Smith's SelectOption disables the buttons synchronously, the bot
+    ///      re-decided 4ms later and dispatched a second Smith into the refusal —
+    ///      diagnostic.log 18:55:06.261-.298).
+    /// When everything here masks off, the mask goes all-false with commands still available —
+    /// exactly the "game says not-yet" state AdvanceStuckGuard's GatedStuckThreshold patience
+    /// was built for; the next settle/heartbeat re-decides once the buttons come back.
+    /// </summary>
+    private static bool RestOptionIsClickable(ChooseRestSiteOptionCommand cmd)
+    {
+        var sync = SpireBot.Replay.ReplayState.ActiveRestSiteSynchronizer;
+        if (sync == null)
+            return false;
+
+        MegaCrit.Sts2.Core.Entities.RestSite.RestSiteOption? option = null;
+        foreach (var o in sync.GetLocalOptions())
+        {
+            if (o.OptionId == cmd.OptionId)
+            {
+                option = o;
+                break;
+            }
+        }
+
+        if (option == null || !option.IsEnabled)
+            return false;
+
+        var room = MegaCrit.Sts2.Core.Nodes.Rooms.NRestSiteRoom.Instance;
+        if (room == null || !GodotObject.IsInstanceValid(room) || !room.IsInsideTree())
+            return false;
+
+        return Affordance.IsLive(room.GetButtonForOption(option));
     }
 
     // ── RewardScreen ─────────────────────────────────────────────────────
@@ -506,6 +553,22 @@ public sealed class ActionMap
         if (room == null || !GodotObject.IsInstanceValid(room) || !room.IsInsideTree())
             return false;
         return Affordance.IsLive(room.GetNodeOrNull<NButton>("%Chest"));
+    }
+
+    /// <summary>
+    /// The chest button exists but is no longer clickable — NTreasureRoom disables it exactly
+    /// when the chest opens, so this is the UI-truth "chest has been opened" signal even when
+    /// the opening click wasn't the bot's own (a human playing in advisor mode). Deliberately
+    /// false while the button hasn't loaded yet (node null): a still-loading room is not an
+    /// opened chest, and treating it as one is exactly the take-before-open crash this guards.
+    /// </summary>
+    private static bool ChestButtonPresentButDead()
+    {
+        var room = SpireBot.Replay.Patches.Replay.TreasureRoomReplayPatch.ActiveRoom;
+        if (room == null || !GodotObject.IsInstanceValid(room) || !room.IsInsideTree())
+            return false;
+        var chest = room.GetNodeOrNull<NButton>("%Chest");
+        return chest != null && GodotObject.IsInstanceValid(chest) && !Affordance.IsLive(chest);
     }
 
     private static void BuildRewardScreen(ActionMap map, ActionLayout actions, DecisionContext ctx)
@@ -544,9 +607,18 @@ public sealed class ActionMap
         // with no subscreen and stay exactly the sim's REWARD_POTION/REWARD_RELIC ask.
         foreach (var claim in ctx.Available.OfType<ClaimRewardCommand>())
         {
-            if (RewardClaimMemory.IsDeclined(claim.RewardIndex))
+            // Identity + state-level affordance (2026-08-20 audit): resolve the reward OBJECT
+            // (indexes shift as claimed buttons disappear — see RewardScreenClassifier
+            // .ResolveReward's doc) and only map claims that would actually land
+            // (Affordance.RewardClaimWouldLand — the game keeps a terminal NRewardsScreen's
+            // buttons enumerable forever, but once the synchronizer's rewardsStack popped, a
+            // click throws "not currently viewing any reward set!" inside a swallowed task).
+            var reward = RewardScreenClassifier.ResolveReward(claim.RewardIndex);
+            if (reward == null || !Affordance.RewardClaimWouldLand(reward))
                 continue;
-            if (RewardScreenClassifier.ResolveRewardKind(claim.RewardIndex) == RewardKind.Card)
+            if (RewardClaimMemory.IsDeclined(reward))
+                continue;
+            if (RewardScreenClassifier.KindOf(reward) == RewardKind.Card)
                 continue;
             if (claim.RewardIndex < choice.Slots)
                 map.Set(choice.Base + claim.RewardIndex, claim, $"Claim reward [{claim.RewardIndex}]");
@@ -568,7 +640,23 @@ public sealed class ActionMap
 
         // Only while the game is actually accepting a pick — otherwise PickRelicLocally throws
         // ("relic picking is not active"), which it did on every decision, forever.
-        var takeChestRelic = Affordance.RelicPickingActive()
+        //
+        // RelicPickingActive alone is NOT "the chest is open": TreasureRoom.Enter calls
+        // BeginRelicPicking() the moment the ROOM loads (TreasureRoom.cs:47), so the backend
+        // accepts a pick while the chest is still closed. Such a pick then executes — and the
+        // game's own treasure UI crashes (NTreasureRoomRelicCollection.AnimateRelicAwards runs
+        // First() over relic nodes that only the open animation creates), wedging the room
+        // (observed live: run SXFY52G6VQ act1 floor9, where the policy sampled Take before
+        // Open; act0 floor10 had sampled Open first and worked). A human can never click Take
+        // first because those relic nodes don't exist yet — mirror that ordering here: Take is
+        // offered only once the chest is actually open, signalled either by RoomOneShots (the
+        // bot dispatched OpenChest this visit) or by the chest button being present but no
+        // longer clickable (NTreasureRoom disables it exactly when it opens — this covers a
+        // human opening the chest in advisor mode).
+        bool chestOpened =
+            ctx.Available.OfType<OpenChestCommand>().Any(RoomOneShots.AlreadyDone)
+            || ChestButtonPresentButDead();
+        var takeChestRelic = Affordance.RelicPickingActive() && chestOpened
             ? ctx.Available.OfType<TakeChestRelicCommand>().FirstOrDefault()
             : null;
         if (takeChestRelic != null && nextSlot < choice.Slots)

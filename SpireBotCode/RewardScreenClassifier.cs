@@ -32,6 +32,21 @@ internal static class RewardScreenClassifier
 {
     internal static RewardKind? ResolveRewardKind(int rewardIndex)
     {
+        object? reward = ResolveReward(rewardIndex);
+        return reward == null ? null : KindOf(reward);
+    }
+
+    /// <summary>
+    /// The game-side reward OBJECT a <see cref="ClaimRewardCommand.RewardIndex"/> resolves to on
+    /// the CURRENT reward screen, or null when it can't be resolved (freed screen, out-of-range
+    /// index). The object — not the index — is a reward's identity: the run-audit
+    /// (2026-08-20, JKZ3B820B6 Event@1) proved indexes are NOT stable across claims — a
+    /// multi-reward set (Orobas's act-boundary gift = several CardRewards) removes each claimed
+    /// button, the rest shift down, and "index 0" names a DIFFERENT reward every time. Anything
+    /// remembering per-reward state (<see cref="RewardClaimMemory"/>) must key on this object.
+    /// </summary>
+    internal static object? ResolveReward(int rewardIndex)
+    {
         try
         {
             var screen = SpireBot.Replay.ReplayState.ActiveRewardsScreen;
@@ -42,18 +57,21 @@ internal static class RewardScreenClassifier
             if (rewardIndex < 0 || rewardIndex >= buttons.Count)
                 return null;
 
-            return buttons[rewardIndex].reward.GetType().Name switch
-            {
-                "RelicReward" => RewardKind.Relic,
-                "PotionReward" => RewardKind.Potion,
-                "CardReward" => RewardKind.Card,
-                _ => RewardKind.None,
-            };
+            return buttons[rewardIndex].reward;
         }
         catch (Exception ex)
         {
-            GD.PrintErr($"[SpireBot] RewardScreenClassifier.ResolveRewardKind threw: {ex.Message} — fail-open (null).");
+            GD.PrintErr($"[SpireBot] RewardScreenClassifier.ResolveReward threw: {ex.Message} — fail-open (null).");
             return null;
         }
     }
+
+    internal static RewardKind KindOf(object reward)
+        => reward.GetType().Name switch
+        {
+            "RelicReward" => RewardKind.Relic,
+            "PotionReward" => RewardKind.Potion,
+            "CardReward" => RewardKind.Card,
+            _ => RewardKind.None,
+        };
 }

@@ -88,6 +88,22 @@ public sealed class TakeChestRelicCommand : ReplayCommand
             return ExecuteResult.Ok();
         }
 
+        // SpireBot delta 2: RelicPickingActive is true from ROOM ENTRY (TreasureRoom.Enter →
+        // BeginRelicPicking, TreasureRoom.cs:47), not from the chest opening — a pre-open pick
+        // executes on the backend and then crashes the game's treasure UI
+        // (NTreasureRoomRelicCollection.AnimateRelicAwards runs First() over relic nodes only
+        // the open animation creates), wedging the room. Refuse while the chest button is
+        // still clickable — the same ordering a real player is physically held to, since the
+        // relic buttons don't exist before the chest opens. ActionMap gates the same way; this
+        // is the defense-in-depth for any other dispatch path.
+        NTreasureRoom? takeRoom = TreasureRoomReplayPatch.ActiveRoom;
+        if (takeRoom != null && takeRoom.IsInsideTree()
+            && SpireBot.SpireBotCode.Affordance.IsLive(takeRoom.GetNodeOrNull<NButton>("%Chest")))
+        {
+            PlayerActionBuffer.LogDispatcher("[TakeChestRelic] chest is not opened yet — skipping.");
+            return ExecuteResult.Ok();
+        }
+
         PlayerActionBuffer.LogDispatcher("[TakeChestRelic] PickRelicLocally(0)");
         Callable.From(() => sync.PickRelicLocally(0)).CallDeferred();
         return ExecuteResult.Ok();

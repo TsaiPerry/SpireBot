@@ -141,6 +141,51 @@ public static class DecisionDumper
         }
     }
 
+    /// <summary>
+    /// Appends a minimal source-tagged line for a NON-POLICY action (auto-advance interstitial,
+    /// unsupported/mapping-gap fallback). 2026-08-20 audit lesson: these used to bypass the dump
+    /// entirely, so decisions.jsonl always looked faithful while godot.log carried the real
+    /// story (~50 silent non-policy actions in run JKZ3B820B6) — "judge live fidelity from
+    /// godot.log fallback/STALL counts, never from the dump alone". Now the dump carries them
+    /// too. Deliberately does NOT touch the per-(act,floor,kind) decision_index counters —
+    /// those are the sim-join key for PassiveDump parity dumps and for policy rows, and a
+    /// non-policy line must never shift them; these lines carry <c>decision_index: -1</c> and a
+    /// <c>source</c> field instead (offline tools key policy rows by the absence of "source").
+    /// </summary>
+    public static void WriteNonPolicy(DecisionContext ctx, SpireBot.Replay.Commands.ReplayCommand cmd, string source)
+    {
+        if (_writer == null)
+            return;
+
+        try
+        {
+            var record = new NonPolicyRecord
+            {
+                Act = ctx.Snapshot.Act,
+                Floor = ctx.Snapshot.Floor,
+                Kind = ctx.Kind.ToString(),
+                Source = source,
+                Command = cmd.ToString() ?? cmd.GetType().Name,
+            };
+            _writer.WriteLine(JsonSerializer.Serialize(record, JsonOptions));
+            _writer.Flush();
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[SpireBot] DecisionDumper.WriteNonPolicy threw (non-fatal): {ex}");
+        }
+    }
+
+    private sealed class NonPolicyRecord
+    {
+        [JsonPropertyName("act")] public int Act { get; set; }
+        [JsonPropertyName("floor")] public int Floor { get; set; }
+        [JsonPropertyName("kind")] public string Kind { get; set; } = "";
+        [JsonPropertyName("decision_index")] public int DecisionIndex { get; set; } = -1;
+        [JsonPropertyName("source")] public string Source { get; set; } = "";
+        [JsonPropertyName("command")] public string Command { get; set; } = "";
+    }
+
     private sealed class TopKEntry
     {
         [JsonPropertyName("label")] public string Label { get; set; } = "";

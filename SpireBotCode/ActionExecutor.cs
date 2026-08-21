@@ -98,6 +98,43 @@ public static class ActionExecutor
     /// queue silently disables the bot for the rest of the run — that is how it sat on the
     /// post-combat reward screen doing nothing.
     /// </summary>
+    /// <summary>
+    /// Drops queued commands that only ever dispatch DURING a combat (PlayCard/EndTurn) — called
+    /// from <see cref="StuckRecovery.OnCombatEnded"/> the moment the combat ends, because from
+    /// that point they are permanently undispatchable (GetDispatchableTypes offers them only
+    /// while <c>CombatManager.IsInProgress</c> with the player in the Play phase). Waiting the
+    /// generic 5s <see cref="DropStaleCommands"/> timeout instead is what stalled the bot after
+    /// every lethal play that had a follow-up EndTurn queued (2026-08-20 audit issue 3, 4/5
+    /// episodes). Returns true when anything was dropped. Other queued command types are kept —
+    /// they may still dispatch on the rewards screen that follows.
+    /// </summary>
+    internal static bool DropCombatScopedCommands()
+    {
+        if (ReplayEngine._pending.Count == 0)
+            return false;
+
+        var kept = new System.Collections.Generic.List<ReplayCommand>();
+        var dropped = new System.Collections.Generic.List<string>();
+        foreach (var c in ReplayEngine._pending)
+        {
+            if (c is PlayCardCommand or EndTurnCommand)
+                dropped.Add(c.GetType().Name);
+            else
+                kept.Add(c);
+        }
+
+        if (dropped.Count == 0)
+            return false;
+
+        ReplayEngine._pending.Clear();
+        foreach (var c in kept)
+            ReplayEngine._pending.Enqueue(c);
+
+        GD.Print($"[SpireBot] ActionExecutor: dropped queued combat-scoped command(s) " +
+                 $"[{string.Join(",", dropped)}] — combat just ended, they can never dispatch.");
+        return true;
+    }
+
     internal static void DropStaleCommands(string reason)
     {
         if (ReplayEngine._pending.Count == 0)

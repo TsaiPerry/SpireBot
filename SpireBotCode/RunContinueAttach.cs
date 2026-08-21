@@ -31,12 +31,13 @@ public static class RunContinueAttach
 {
     /// <summary>The character the policy and contract were trained for. A resumed run of any
     /// other character is left alone: the action space and observation layout are Ironclad's, so
-    /// the advice would be confidently wrong rather than absent.</summary>
-    private const string SupportedCharacter = "IRONCLAD";
+    /// the advice would be confidently wrong rather than absent. Shared with
+    /// <see cref="RunNewAttach"/>, which applies the same rule to brand-new runs.</summary>
+    internal const string SupportedCharacter = "IRONCLAD";
 
     /// <summary>The ascension the policy was trained at, and the one <see cref="BotController.StartBotRun"/>
-    /// hard-codes for the runs it starts itself.</summary>
-    private const int SupportedAscension = 0;
+    /// hard-codes for the runs it starts itself. Shared with <see cref="RunNewAttach"/>.</summary>
+    internal const int SupportedAscension = 0;
 
     private static bool _armed;
     private static string _pendingSeed = "";
@@ -112,6 +113,18 @@ public static class RunContinueAttach
         return true;
     }
 
+    /// <summary>
+    /// Shared entry point for the other attach trigger (<see cref="RunNewAttach"/>): stores the
+    /// seed and arms the same one-shot RoomEntered attach this class uses for continued runs.
+    /// Both triggers funnel into one latch on purpose — <see cref="MenuInjection"/>'s single
+    /// <see cref="Disarm"/> call then covers every abandoned-before-first-room case.
+    /// </summary>
+    internal static void ArmForSeed(string seed)
+    {
+        _pendingSeed = seed;
+        Arm();
+    }
+
     private static void Arm()
     {
         if (_armed) return;
@@ -152,5 +165,99 @@ public static class RunContinueAttach
         var manager = RunManager.Instance;
         if (manager != null)
             manager.RoomEntered -= OnRoomEntered;
+    }
+}
+
+/// <summary>
+/// The same paused-advisor attach as <see cref="RunContinueAttach"/>, for a BRAND-NEW run the
+/// player starts through the game's own character-select flow — without this, "Will take: ..."
+/// only ever showed on continued runs and the mod's own "Bot Run" button, and a normal new run
+/// got no overlay at all.
+///
+/// Timing mirrors the Continue path exactly. <c>RunManager.SetUpNewSingleplayer</c> runs
+/// synchronously inside <c>NGame.StartNewSingleplayerRun</c> (NGame.cs:741) BEFORE
+/// <c>StartRun</c> has loaded the map or any room, so attaching here would grind Unsupported
+/// decisions against a half-loaded run; the postfix only arms, and the attach happens on the
+/// first <c>RunManager.RoomEntered</c> via <see cref="RunContinueAttach.ArmForSeed"/>'s shared
+/// latch.
+///
+/// Runs the bot starts itself take this same code path (<see cref="BotController.StartBotRun"/>
+/// calls <c>StartNewSingleplayerRun</c>), but StartBotRun marks the bot running (its
+/// BeginDriving reset) BEFORE that call, so the <see cref="BotController.IsRunning"/> guard
+/// below declines them and the bot never advises its own run twice.
+/// </summary>
+[HarmonyPatch(typeof(RunManager), nameof(RunManager.SetUpNewSingleplayer))]
+public static class RunNewAttach
+{
+    [HarmonyPostfix]
+    public static void Postfix(RunState state, DateTimeOffset? dailyTime)
+    {
+        try
+        {
+            if (!ShouldAttach(state, dailyTime, out string seed))
+                return;
+
+            RunContinueAttach.ArmForSeed(seed);
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[SpireBot] RunNewAttach.Postfix failed — the new run will not be " +
+                        $"advised: {ex}");
+        }
+    }
+
+    /// <summary>Same decline-with-a-log contract as <see cref="RunContinueAttach"/>'s
+    /// ShouldAttach, reading the live <see cref="RunState"/> instead of a save.</summary>
+    private static bool ShouldAttach(RunState? state, DateTimeOffset? dailyTime, out string seed)
+    {
+        seed = "";
+
+        if (state == null)
+            return false;
+
+        // Same single setting as the Continue path: StartPaused IS the advisor switch.
+        if (!SpireBotConfig.StartPaused)
+            return false;
+
+        // True here means BotController.StartBotRun initiated this run and is already driving
+        // it — expected on every bot run, so no log line.
+        if (BotController.IsRunning)
+            return false;
+
+        if (dailyTime != null)
+        {
+            GD.Print("[SpireBot] RunNewAttach: new run is a daily run — not attaching.");
+            return false;
+        }
+
+        if (state.GameMode != GameMode.Standard)
+        {
+            GD.Print($"[SpireBot] RunNewAttach: new run is {state.GameMode}, not " +
+                     $"{GameMode.Standard} — not attaching.");
+            return false;
+        }
+
+        string? character = state.Players?.Count > 0
+            ? state.Players[0].Character?.Id.Entry
+            : null;
+        if (character != RunContinueAttach.SupportedCharacter)
+        {
+            GD.Print($"[SpireBot] RunNewAttach: new run is character " +
+                     $"'{character ?? "unknown"}', not {RunContinueAttach.SupportedCharacter} — " +
+                     $"not attaching, because the policy's action space and observations are " +
+                     $"{RunContinueAttach.SupportedCharacter}'s.");
+            return false;
+        }
+
+        if (state.AscensionLevel != RunContinueAttach.SupportedAscension)
+        {
+            GD.Print($"[SpireBot] RunNewAttach: new run is ascension {state.AscensionLevel}, " +
+                     $"not {RunContinueAttach.SupportedAscension} — not attaching, because the " +
+                     $"policy was trained at ascension {RunContinueAttach.SupportedAscension}.");
+            return false;
+        }
+
+        seed = state.Rng?.StringSeed ?? "unknown-seed";
+        return true;
     }
 }

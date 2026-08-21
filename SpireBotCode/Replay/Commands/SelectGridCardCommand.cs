@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
 
 namespace SpireBot.Replay.Commands;
 
@@ -51,6 +52,18 @@ public class SelectGridCardCommand : ReplayCommand
         }
 
         CardGridScreenCapture.ConfirmSelection(screen, selected);
+        // SpireBot delta 17: the game's own single-select confirm
+        // (NDeckUpgradeSelectScreen.CheckIfSelectionComplete:248-257) pairs
+        // SetResult with NOverlayStack.Instance.Remove(this). Resolving the
+        // completion source without removing the screen leaves a ghost
+        // overlay: the rest site re-offers its options underneath and the
+        // bot smiths again (observed: 2 free upgrades minted at SXFY52G6VQ
+        // act0 f12, rest never consumed). Mirror the full close.
+        Godot.Callable.From(() =>
+        {
+            if (Godot.GodotObject.IsInstanceValid(screen) && screen.IsInsideTree())
+                NOverlayStack.Instance?.Remove(screen);
+        }).CallDeferred();
         CardGridScreenCapture.ActiveScreen = null;
         return ExecuteResult.Ok();
     }
