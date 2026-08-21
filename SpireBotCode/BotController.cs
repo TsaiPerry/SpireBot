@@ -433,9 +433,9 @@ public static class BotController
 
         // The vendored dispatcher fast-forwards a replay (_gameSpeed defaults to 2.0) and
         // re-asserts it whenever IsActive is true, which BotDriving now makes permanent. Pin it
-        // so a bot run doesn't silently double-speed the game — and so a run that starts paused
-        // for manual play runs at 1.0x. Must follow the pause assignment above: the effective
-        // speed depends on it.
+        // to the user's GameSpeed setting so a bot run doesn't silently double-speed the game.
+        // Pause no longer affects this — decision pacing is DecisionSpeed's job, on unscaled
+        // timers.
         ApplyEffectiveSpeed();
         _lastDecisionKey = null;
         _repeatCount = 0;
