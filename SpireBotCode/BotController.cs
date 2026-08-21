@@ -88,22 +88,18 @@ public static class BotController
     }
 
     /// <summary>
-    /// Pushes the multiplier the game should actually be running at right now: the user's
-    /// selected speed (<see cref="SpireBotConfig.GameSpeed"/>) while the bot is deciding, 1.0
-    /// while paused so the board can be read at normal speed — and so a run that starts paused
-    /// for manual play does not run the game at grind speed.
-    ///
-    /// This MUST go through ReplayDispatcher.GameSpeed rather than assigning Engine.TimeScale
-    /// directly. The vendored ExecuteNext re-asserts TimeScale from its own _gameSpeed field on
-    /// every dispatch (Replay/ReplayDispatcher.cs:1112-1114), above its own paused check.
-    /// RunReplays can assign TimeScale directly on pause only because its pause also
-    /// short-circuits TryDispatch (Replay/ReplayDispatcher.cs:1046) so ExecuteNext never runs;
-    /// SpireBot's pause deliberately leaves that path running, so a direct assignment here would
-    /// be stomped back to the fast value within a frame.
+    /// Pins the vendored dispatcher's speed to the user's GameSpeed setting. The bot no longer
+    /// varies this by its own state (2026-08-20 UX pacing spec §2 — decision pacing is
+    /// DecisionSpeed's job, on unscaled timers); the pin itself must stay, because the vendored
+    /// ExecuteNext re-asserts TimeScale from its own _gameSpeed field (default 2.0 — replay
+    /// fast-forward) on every dispatch while a driver is attached
+    /// (Replay/ReplayDispatcher.cs:1112-1114), so an unpinned bot run silently double-speeds
+    /// the game. This MUST go through ReplayDispatcher.GameSpeed rather than assigning
+    /// Engine.TimeScale directly, for that same re-assertion reason.
     /// </summary>
     public static void ApplyEffectiveSpeed()
     {
-        ReplayDispatcher.GameSpeed = Paused ? 1.0f : SpireBotConfig.GameSpeed;
+        ReplayDispatcher.GameSpeed = SpireBotConfig.GameSpeed;
     }
 
     /// <summary>With a previewed action held: commit exactly that action, staying paused (the

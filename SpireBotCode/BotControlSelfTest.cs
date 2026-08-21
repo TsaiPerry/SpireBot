@@ -99,19 +99,20 @@ public static class BotControlSelfTest
             if (BotController.HasPendingPreview)
                 throw new Exception("unpausing must leave no held preview.");
 
-            // Effective-speed rule (advisor-mode spec, Component 3): one owner for
-            // selected-vs-applied speed, so the pause button and a run that starts paused can
-            // never disagree. Both the pause flag and the dispatcher speed are restored below —
-            // this runs at mod init, and leaving either changed would mis-start the next run.
+            // Effective-speed rule (2026-08-20 UX pacing spec §2): GameSpeed is a plain
+            // user setting applied whether or not autopilot is on — pause no longer forces
+            // 1.0x, because decision pacing is now DecisionSpeed's job and never TimeScale's.
+            // Both the pause flag and the dispatcher speed are restored below — this runs at
+            // mod init, and leaving either changed would mis-start the next run.
             bool pausedBefore = BotController.Paused;
             float dispatcherSpeedBefore = ReplayDispatcher.GameSpeed;
             float selected = SpireBotConfig.GameSpeed;
 
             BotController.Paused = true;
             BotController.ApplyEffectiveSpeed();
-            if (Math.Abs(ReplayDispatcher.GameSpeed - 1.0f) > Tolerance)
+            if (Math.Abs(ReplayDispatcher.GameSpeed - selected) > Tolerance)
                 throw new Exception(
-                    $"paused must apply 1.0x, got {ReplayDispatcher.GameSpeed}.");
+                    $"paused must still apply the selected {selected}x, got {ReplayDispatcher.GameSpeed}.");
 
             BotController.Paused = false;
             BotController.ApplyEffectiveSpeed();

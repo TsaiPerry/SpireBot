@@ -3,8 +3,6 @@ using System;
 using BaseLib.Config;
 using Godot;
 
-using SpireBot.Replay;
-
 namespace SpireBot.SpireBotCode.Overlay;
 
 /// <summary>
@@ -14,9 +12,10 @@ namespace SpireBot.SpireBotCode.Overlay;
 ///
 /// Owned by <see cref="ThinkingOverlay"/>, which adds one instance as the first row of its panel
 /// and pumps <see cref="RefreshControls"/> from its own <c>_Process</c>. Everything this touches
-/// (<see cref="BotController.Paused"/>, <see cref="SpireBotConfig.GameSpeed"/>,
-/// <see cref="ReplayDispatcher.GameSpeed"/>) is static, so this node holds no state of its own
-/// beyond its child widgets — which is why all the handlers below are static too.
+/// (<see cref="BotController.Paused"/>, <see cref="SpireBotConfig.DecisionSpeed"/>) is static, so
+/// this node holds no state of its own beyond its child widgets — which is why all the handlers
+/// below are static too. Game speed (<see cref="SpireBotConfig.GameSpeed"/>) lives only on the
+/// mod-config screen now — this bar's ◀/▶ buttons drive decision pacing, not TimeScale.
 /// </summary>
 public sealed partial class BotControlBar : HBoxContainer
 {
@@ -38,7 +37,7 @@ public sealed partial class BotControlBar : HBoxContainer
 
         _speedLabel = new Label
         {
-            CustomMinimumSize = new Vector2(48, 0),
+            CustomMinimumSize = new Vector2(64, 0),
             HorizontalAlignment = HorizontalAlignment.Center,
         };
         _speedLabel.AddThemeFontSizeOverride("font_size", 14);
@@ -68,31 +67,24 @@ public sealed partial class BotControlBar : HBoxContainer
     private static void OnPausePressed()
     {
         BotController.Paused = !BotController.Paused;
-        ApplyEffectiveSpeed();
     }
 
     private static void OnStepPressed() => BotController.StepOnce();
 
-    private static void OnSpeedDown() => SetSelectedSpeed(SpeedLadder.Prev(SpireBotConfig.GameSpeed));
+    private static void OnSpeedDown()
+        => SetSelectedSpeed(SpeedLadder.Prev(SpeedLadder.BotSteps, SpireBotConfig.DecisionSpeed));
 
-    private static void OnSpeedUp() => SetSelectedSpeed(SpeedLadder.Next(SpireBotConfig.GameSpeed));
+    private static void OnSpeedUp()
+        => SetSelectedSpeed(SpeedLadder.Next(SpeedLadder.BotSteps, SpireBotConfig.DecisionSpeed));
 
-    /// <summary>Records the user's chosen multiplier: in memory, on disk (debounced), and — via
-    /// <see cref="ApplyEffectiveSpeed"/> — in the running game. Writing SpireBotConfig is what
-    /// makes a live change survive StartBotRun's re-pin (BotController.cs:189) into the next
-    /// run.</summary>
+    /// <summary>Records the user's chosen decision-speed multiplier: in memory and on disk
+    /// (debounced). Nothing to "apply" — the pipeline reads SpireBotConfig.DecisionSpeed at
+    /// every Dispatch, so the very next decision paces at the new value.</summary>
     private static void SetSelectedSpeed(float speed)
     {
-        SpireBotConfig.GameSpeed = speed;
+        SpireBotConfig.DecisionSpeed = speed;
         ModConfig.SaveDebounced<SpireBotConfig>();
-        ApplyEffectiveSpeed();
     }
-
-    /// <summary>Pushes the multiplier the game should actually be running at right now.
-    /// The rule and its full TimeScale rationale live on
-    /// <see cref="BotController.ApplyEffectiveSpeed"/>, which a run that starts paused also
-    /// calls — one owner, so the two paths can never disagree.</summary>
-    private static void ApplyEffectiveSpeed() => BotController.ApplyEffectiveSpeed();
 
     /// <summary>Re-renders the bar from current state. Cheap and idempotent — ThinkingOverlay
     /// calls it every frame rather than wiring change events for a five-widget bar.</summary>
@@ -110,6 +102,8 @@ public sealed partial class BotControlBar : HBoxContainer
         bool paused = BotController.Paused;
         _pauseButton.Text = paused ? "▶ Play" : "⏸ Pause";
         _stepButton.Visible = paused;
-        _speedLabel.Text = $"{SpireBotConfig.GameSpeed:0.0}x";
+        _speedLabel.Text = PacingPlan.IsInstant(SpireBotConfig.DecisionSpeed)
+            ? "Inst"
+            : $"Bot {SpireBotConfig.DecisionSpeed:0.0}x";
     }
 }
