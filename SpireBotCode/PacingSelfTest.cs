@@ -40,7 +40,7 @@ public static class PacingSelfTest
             AssertDwell(DecisionKind.Shop, true, 2.0);
             AssertDwell(DecisionKind.Rest, true, 1.5);
             AssertDwell(DecisionKind.RewardScreen, true, 1.5);
-            AssertDwell(DecisionKind.Combat, false, 0.8);
+            AssertDwell(DecisionKind.Combat, false, 0.55);
             AssertDwell(DecisionKind.Map, false, 1.5);
 
             // Unsupported is stall recovery — it must never dwell.

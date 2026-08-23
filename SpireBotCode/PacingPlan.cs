@@ -36,7 +36,7 @@ public static class PacingPlan
         DecisionKind.RewardScreen => surfaceChanged ? 1.5 : 1.0,
         DecisionKind.SelectCards => surfaceChanged ? 1.5 : 1.0,
         DecisionKind.SelectOption => surfaceChanged ? 1.5 : 1.0,
-        DecisionKind.Combat => surfaceChanged ? 1.0 : 0.8,
+        DecisionKind.Combat => surfaceChanged ? 1.0 : 0.55,
         DecisionKind.Map => 1.5,
         _ => 0.0,
     };
