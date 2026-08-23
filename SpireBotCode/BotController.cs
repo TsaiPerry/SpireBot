@@ -187,6 +187,11 @@ public static class BotController
         // The pacing tier for the NEXT decision keys off the surface this one acted on.
         _lastCommittedSurfaceKey = SurfaceKey(held.Ctx);
 
+        // Shop-visibility flow: a fake merchant is left through its event's proceed — close the
+        // shop menu first so the transition looks like a player leaving, not a UI left hanging.
+        if (held.Cmd is ChooseEventOptionCommand)
+            CloseFakeInventoryIfOpen();
+
         try
         {
             ActionExecutor.Execute(held.Cmd, held.Kind);
@@ -758,29 +763,73 @@ public static class BotController
            // gets the Shop reading dwell, not the between-actions one (shop-visibility flow).
            + (ctx.Kind == DecisionKind.Shop && ShopInventoryIsOpen() ? "::open" : "");
 
-    private static bool ShopInventoryIsOpen()
-        => ScreenExitMemory.IsRealShopActive()
-           && ReplayState.ActiveMerchantRoom!.Inventory is { IsOpen: true };
+    /// <summary>The live fake merchant (an event-embedded shop, <c>NFakeMerchant</c>), or null.
+    /// Mutually exclusive with a real merchant room in practice (FakeMerchantReplayPatch nulls
+    /// ActiveMerchantRoom when it captures the fake one).</summary>
+    private static MegaCrit.Sts2.Core.Nodes.Events.Custom.NFakeMerchant? FakeMerchantIfActive()
+        => ReplayState.FakeMerchantInstance is { } fm && GodotObject.IsInstanceValid(fm) && fm.IsInsideTree()
+            ? fm : null;
+
+    /// <summary>The inventory UI of whichever shop is live — real room or fake merchant (both
+    /// are the same <c>NMerchantInventory</c> node type) — or null when neither is.</summary>
+    private static MegaCrit.Sts2.Core.Nodes.Screens.Shops.NMerchantInventory? ActiveShopInventory()
+    {
+        if (ScreenExitMemory.IsRealShopActive())
+            return ReplayState.ActiveMerchantRoom!.Inventory;
+        return FakeMerchantIfActive()?.Inventory;
+    }
+
+    private static bool ShopInventoryIsOpen() => ActiveShopInventory() is { IsOpen: true };
+
+    // NMerchantInventory.Close is what the vendored CloseShopCommand invokes (CloseShopCommand.cs:14-16);
+    // the fake merchant has no Close command in the dispatcher's enumeration, so the flow calls it
+    // directly when it needs to tidy the fake inventory before leaving the event.
+    private static readonly System.Reflection.MethodInfo? InventoryCloseMethod =
+        typeof(MegaCrit.Sts2.Core.Nodes.Screens.Shops.NMerchantInventory).GetMethod("Close",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+
+    /// <summary>Closes the fake merchant's inventory if it is open. Called right before the event
+    /// proceed executes, so the bot leaves the way a player would (menu closed) instead of
+    /// transitioning rooms with the shop UI still up. Best-effort: the proceed works at the model
+    /// level regardless, so a failure here is cosmetic.</summary>
+    private static void CloseFakeInventoryIfOpen()
+    {
+        var fm = FakeMerchantIfActive();
+        if (fm?.Inventory is not { IsOpen: true } inv) return;
+        try
+        {
+            InventoryCloseMethod?.Invoke(inv, null);
+            GD.Print("[SpireBot] BotController: closed the fake merchant's inventory before leaving the event.");
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[SpireBot] BotController: closing the fake merchant inventory threw (cosmetic): {ex}");
+        }
+    }
 
     /// <summary>
-    /// Shop-visibility flow (2026-08-22, Perry: "display the shop menu instead of invisibly buying").
-    /// The vendored dispatcher enumerates every Buy*Command as soon as the merchant ROOM exists
-    /// (ReplayDispatcher.cs:547-553), and purchases go through the model (InvokePurchase), so the
-    /// policy used to buy with the inventory UI never opened — OpenShopCommand only ever ran as a
-    /// nothing-else-legal fallback. Now a Shop-kind decision on a REAL merchant room is sequenced:
-    /// (1) shop already left (policy chose Leave = CloseShop, or ProceedToMap) → auto-advance
-    /// ProceedToMap, never re-offer purchases; (2) inventory closed → open it first (OpenShop, with
-    /// the Shop reading dwell so the merchant is seen); (3) inventory open → fall through to the
-    /// policy, whose purchases are now visible and individually paced. Fake merchants (events) are
-    /// untouched — IsRealShopActive is the gate. Returns true when it dispatched or deliberately
-    /// waited, false when the policy should decide.
+    /// Shop-visibility flow (2026-08-22, Perry: "display the shop menu instead of invisibly buying";
+    /// extended to fake merchants the same day). The vendored dispatcher enumerates every
+    /// Buy*Command as soon as the merchant ROOM / fake merchant exists (ReplayDispatcher.cs:547-560),
+    /// and purchases go through the model (InvokePurchase), so the policy used to buy with the
+    /// inventory UI never opened — the Open*Shop commands only ever ran as a nothing-else-legal
+    /// fallback. Now a Shop-kind decision is sequenced: (1) REAL shop already left (policy chose
+    /// Leave = CloseShop, or ProceedToMap) → auto-advance ProceedToMap, never re-offer purchases;
+    /// (2) inventory closed → open it first (OpenShop / OpenFakeShop, with the Shop reading dwell so
+    /// the merchant is seen); (3) inventory open → fall through to the policy, whose purchases are
+    /// now visible and individually paced. A fake merchant has no close/proceed command of its own
+    /// — the bot leaves via the owning event's proceed (TryAutoAdvance's ChooseEventOption -1),
+    /// and Commit closes the fake inventory just before that executes. Returns true when it
+    /// dispatched or deliberately waited, false when the policy should decide.
     /// </summary>
     private static bool TryShopFlow(DecisionContext ctx)
     {
-        if (!ScreenExitMemory.IsRealShopActive())
+        bool real = ScreenExitMemory.IsRealShopActive();
+        bool fake = !real && FakeMerchantIfActive() != null;
+        if (!real && !fake)
             return false;
 
-        if (ScreenExitMemory.HasExited(ScreenFamily.Shop))
+        if (real && ScreenExitMemory.HasExited(ScreenFamily.Shop))
         {
             var proceed = ctx.Available.OfType<ProceedToMapCommand>().FirstOrDefault();
             if (proceed == null)
@@ -798,10 +847,12 @@ public static class BotController
         if (ShopInventoryIsOpen())
             return false;
 
-        var open = ctx.Available.OfType<OpenShopCommand>().FirstOrDefault();
+        ReplayCommand? open = real
+            ? ctx.Available.OfType<OpenShopCommand>().FirstOrDefault()
+            : ctx.Available.OfType<OpenFakeShopCommand>().FirstOrDefault();
         if (open == null)
             return false;
-        GD.Print("[SpireBot] BotController: opening the shop inventory before buying, so purchases are visible.");
+        GD.Print($"[SpireBot] BotController: opening the {(real ? "shop" : "fake merchant")} inventory before buying, so purchases are visible.");
         Dispatch(open, ctx.Kind, ctx, map: null, obs: null, result: null, source: "shop-open");
         return true;
     }
