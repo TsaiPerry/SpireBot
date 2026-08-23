@@ -194,6 +194,16 @@ internal static class ScreenExitMemory
         // this flag at all).
         if (kind == DecisionKind.Shop && cmd is ProceedToMapCommand && IsRealShopActive())
             MarkExited(ScreenFamily.Shop, cmd);
+
+        // 2026-08-22 (shop-visibility flow): the bot now OPENS the inventory before buying, so the
+        // policy's "Leave shop" maps to CloseShopCommand (enumerable only while the inventory is
+        // open). Treat that close as leaving too: the sim's leave is terminal (driver.py appends
+        // len(entries) as the final shop action and never re-enters), and BotController.TryShopFlow
+        // would otherwise reopen the inventory on the very next Shop-kind decision and loop. The
+        // earlier "CloseShop is deliberately NOT a trigger" rule above predates the flow that makes
+        // CloseShop reachable at all for a bot-driven visit.
+        if (kind == DecisionKind.Shop && cmd is CloseShopCommand && IsRealShopActive())
+            MarkExited(ScreenFamily.Shop, cmd);
     }
 
     /// <summary>True while <see cref="ReplayState.ActiveMerchantRoom"/> — the REAL

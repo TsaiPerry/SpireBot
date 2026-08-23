@@ -753,7 +753,58 @@ public static class BotController
     private static string? _lastCommittedSurfaceKey;
 
     private static string SurfaceKey(DecisionContext ctx)
-        => $"{ctx.Kind}::{ctx.Snapshot.RoomType}::{ctx.Snapshot.Floor}";
+        => $"{ctx.Kind}::{ctx.Snapshot.RoomType}::{ctx.Snapshot.Floor}"
+           // The open inventory is a new surface: the first purchase made with the menu visible
+           // gets the Shop reading dwell, not the between-actions one (shop-visibility flow).
+           + (ctx.Kind == DecisionKind.Shop && ShopInventoryIsOpen() ? "::open" : "");
+
+    private static bool ShopInventoryIsOpen()
+        => ScreenExitMemory.IsRealShopActive()
+           && ReplayState.ActiveMerchantRoom!.Inventory is { IsOpen: true };
+
+    /// <summary>
+    /// Shop-visibility flow (2026-08-22, Perry: "display the shop menu instead of invisibly buying").
+    /// The vendored dispatcher enumerates every Buy*Command as soon as the merchant ROOM exists
+    /// (ReplayDispatcher.cs:547-553), and purchases go through the model (InvokePurchase), so the
+    /// policy used to buy with the inventory UI never opened — OpenShopCommand only ever ran as a
+    /// nothing-else-legal fallback. Now a Shop-kind decision on a REAL merchant room is sequenced:
+    /// (1) shop already left (policy chose Leave = CloseShop, or ProceedToMap) → auto-advance
+    /// ProceedToMap, never re-offer purchases; (2) inventory closed → open it first (OpenShop, with
+    /// the Shop reading dwell so the merchant is seen); (3) inventory open → fall through to the
+    /// policy, whose purchases are now visible and individually paced. Fake merchants (events) are
+    /// untouched — IsRealShopActive is the gate. Returns true when it dispatched or deliberately
+    /// waited, false when the policy should decide.
+    /// </summary>
+    private static bool TryShopFlow(DecisionContext ctx)
+    {
+        if (!ScreenExitMemory.IsRealShopActive())
+            return false;
+
+        if (ScreenExitMemory.HasExited(ScreenFamily.Shop))
+        {
+            var proceed = ctx.Available.OfType<ProceedToMapCommand>().FirstOrDefault();
+            if (proceed == null)
+            {
+                // The proceed button re-enables on the InventoryClosed signal — a frame or two
+                // after CloseShop. Wait rather than let the policy buy from a shop it just left.
+                GD.Print("[SpireBot] BotController: shop left — waiting for the proceed button.");
+                return true;
+            }
+            GD.Print("[SpireBot] BotController: shop left — proceeding to the map.");
+            Dispatch(proceed, ctx.Kind, ctx, map: null, obs: null, result: null, source: "shop-leave");
+            return true;
+        }
+
+        if (ShopInventoryIsOpen())
+            return false;
+
+        var open = ctx.Available.OfType<OpenShopCommand>().FirstOrDefault();
+        if (open == null)
+            return false;
+        GD.Print("[SpireBot] BotController: opening the shop inventory before buying, so purchases are visible.");
+        Dispatch(open, ctx.Kind, ctx, map: null, obs: null, result: null, source: "shop-open");
+        return true;
+    }
 
     private static void ArmDwell(PendingAction pending, double seconds)
     {
@@ -874,6 +925,10 @@ public static class BotController
             HandleUnsupported(ctx, map);
             return;
         }
+
+        // Shop-visibility flow — sequences open → buy (visible) → close → proceed; see TryShopFlow.
+        if (ctx.Kind == DecisionKind.Shop && TryShopFlow(ctx))
+            return;
 
         DispatchWithFallback(ctx, map, obs, forceFallback: false);
     }
