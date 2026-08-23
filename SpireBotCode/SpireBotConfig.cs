@@ -23,6 +23,15 @@ public class SpireBotConfig : SimpleModConfig
     [ConfigSlider(1, 50, 1)]
     public static int TopK { get; set; } = 5;
 
+    /// <summary>
+    /// Greedy (Temperature 0) decoding: when true, identical hand instances (same card,
+    /// affliction, enchantment, upgrade level and target) pool their probability and the
+    /// heaviest GROUP wins, instead of raw per-instance argmax — which let a unique action
+    /// (End Turn at 3 energy, a potion) beat a card whose mass was split across duplicates
+    /// (2026-08-22 finding; see OnnxPolicyCore.ArgmaxMerged). Mirrors `eval.py --merge-duplicates`.
+    /// </summary>
+    public static bool MergeDuplicateCards { get; set; } = true;
+
     /// <summary>If true, dump each decision (observation + action probabilities) to DumpDir for offline inspection.</summary>
     public static bool DumpDecisions { get; set; } = false;
 

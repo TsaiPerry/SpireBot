@@ -46,6 +46,7 @@ public static class MainFile
             ContractSelfTest.Run();
             BotControlSelfTest.Run();
             PacingSelfTest.Run();
+            PolicySelfTest.Run();
         }
     }
 }

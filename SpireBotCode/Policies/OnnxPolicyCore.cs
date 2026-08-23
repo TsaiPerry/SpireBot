@@ -39,6 +39,15 @@ public sealed class OnnxPolicyException : Exception
 /// <c>models.py</c>'s <c>action_logits</c> implementations use). Batch is fixed at 1 — the
 /// exporter traces with no dynamic axes.
 /// </summary>
+/// <summary>
+/// Where <see cref="OnnxPolicyCore.PlayGroupKeys"/> finds the hand in the flat obs arrays and the
+/// play block in the action space. Built from the Contract by OnnxPolicy (kept Contract-free here
+/// so the core stays compilable standalone for the console self-test runner).
+/// </summary>
+public readonly record struct HandGroupLayout(
+    int PlayBase, int MaxHand, int MaxEnemies,
+    int HandIdsOffset, int HandFOffset, int CardFeatureWidth, int UpgradeFeatureIndex);
+
 public static class OnnxPolicyCore
 {
     /// <summary>Illegal-position fill value the exporter's graph uses in its logits output —
@@ -194,6 +203,77 @@ public static class OnnxPolicyCore
         if (bestIndices.Count == 0) return -1;
         if (bestIndices.Count == 1) return bestIndices[0];
         return bestIndices[TieBreakRng.Next(bestIndices.Count)];
+    }
+
+    /// <summary>
+    /// Greedy decode over GROUPS of legal actions (2026-08-22, runs 13AEBPAE1Y/UNEUS7RD44):
+    /// softmax the legal logits (temperature 1), sum the probability of every action sharing a
+    /// non-null <paramref name="keys"/> entry (null = its own singleton group), take the
+    /// heaviest group, and dispatch its highest-logit member (ties within the group fall to
+    /// <see cref="Argmax"/>'s rule). With all-null keys this IS <see cref="Argmax"/>. Returns
+    /// -1 when nothing is legal. Mirrors sts2_rl.evaluation.merged_greedy_action.
+    ///
+    /// Why: the per-instance action space splits one "play a Strike" intent across every Strike
+    /// in hand, so plain argmax took a UNIQUE action (End Turn at 3 energy, a potion, a lone
+    /// Defend) over a card whose merged mass was far higher (0.76 over five Strikes vs 0.24).
+    /// </summary>
+    public static int ArgmaxMerged(float[] logits, bool[] mask, string?[] keys)
+    {
+        float[] probs = SoftmaxOverLegal(logits, mask, 1f);
+        var mass = new Dictionary<string, double>();
+        var members = new Dictionary<string, List<int>>();
+        string? bestSingleKey = null;
+        double bestMass = double.NegativeInfinity;
+        int n = Math.Min(logits.Length, mask.Length);
+        for (int a = 0; a < n; a++)
+        {
+            if (!mask[a]) continue;
+            string key = a < keys.Length && keys[a] != null ? keys[a]! : $"\u0000single:{a}";
+            if (!mass.TryGetValue(key, out double m)) { m = 0; members[key] = new List<int>(); }
+            m += probs[a];
+            mass[key] = m;
+            members[key].Add(a);
+        }
+        if (mass.Count == 0) return -1;
+        foreach (var kv in mass)
+        {
+            if (kv.Value > bestMass) { bestMass = kv.Value; bestSingleKey = kv.Key; }
+        }
+        var group = members[bestSingleKey!];
+        if (group.Count == 1) return group[0];
+        // Highest-logit member of the winning group; exact ties -> Argmax's tie rule.
+        var groupMask = new bool[mask.Length];
+        foreach (int a in group) groupMask[a] = true;
+        return Argmax(logits, groupMask);
+    }
+
+    /// <summary>
+    /// One group key per action id (null = no group). Legal PLAY actions whose hand instance the
+    /// model cannot tell apart share a key: the hand.ids triple (card id, affliction id,
+    /// enchantment id), the hand.f upgrade-level cell and the target slot. Upgraded / enchanted /
+    /// afflicted copies therefore NEVER merge with their plain counterparts (Perry, 2026-08-22).
+    /// End turn, potions, out-of-combat ids and masked-out ids are null. Built from the SAME
+    /// f/i arrays the model reads, so it is exactly the model's own notion of "identical".
+    /// Mirrors sts2_rl.evaluation.play_group_keys.
+    /// </summary>
+    public static string?[] PlayGroupKeys(float[] f, long[] i, bool[] mask, HandGroupLayout L)
+    {
+        var keys = new string?[mask.Length];
+        for (int h = 0; h < L.MaxHand; h++)
+        {
+            int idsBase = L.HandIdsOffset + h * 3;
+            int upIdx = L.HandFOffset + h * L.CardFeatureWidth + L.UpgradeFeatureIndex;
+            if (idsBase + 2 >= i.Length || upIdx >= f.Length) break;
+            long cardId = i[idsBase], afflId = i[idsBase + 1], enchId = i[idsBase + 2];
+            float upgrade = f[upIdx];
+            for (int e = 0; e < L.MaxEnemies; e++)
+            {
+                int a = L.PlayBase + h * L.MaxEnemies + e;
+                if (a < 0 || a >= mask.Length || !mask[a]) continue;
+                keys[a] = $"play:{cardId}:{afflId}:{enchId}:{upgrade:F4}:{e}";
+            }
+        }
+        return keys;
     }
 
     /// <summary>

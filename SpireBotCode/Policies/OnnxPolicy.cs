@@ -130,7 +130,12 @@ public sealed class OnnxPolicy : IPolicy, IDisposable
         {
             // Deterministic argmax. The TopK breakdown reported alongside it is a display-only
             // temperature=1 softmax — it never influences which action gets chosen.
-            chosen = OnnxPolicyCore.Argmax(logits, mask);
+            // MergeDuplicateCards (default on, 2026-08-22): argmax over GROUPS of identical hand
+            // instances instead of raw ids — see OnnxPolicyCore.ArgmaxMerged / PolicySelfTest.
+            chosen = SpireBotConfig.MergeDuplicateCards
+                ? OnnxPolicyCore.ArgmaxMerged(logits, mask,
+                    OnnxPolicyCore.PlayGroupKeys(obs.F, obs.I, mask, HandGroupLayoutFor(_contract)))
+                : OnnxPolicyCore.Argmax(logits, mask);
             displayProbs = OnnxPolicyCore.SoftmaxOverLegal(logits, mask, 1f);
         }
         else
@@ -152,6 +157,22 @@ public sealed class OnnxPolicy : IPolicy, IDisposable
         var topKResult = ranked.Select(r => (map.LabelFor(r.id), r.prob)).ToArray();
 
         return new PolicyResult { ActionId = chosen, TopK = topKResult };
+    }
+
+    /// <summary>The contract's hand/play geometry for <see cref="OnnxPolicyCore.PlayGroupKeys"/>:
+    /// play block from the action layout, hand.ids / hand.f offsets from the obs layout, the
+    /// per-card feature width derived from the block width, and the upgrade column shared with
+    /// <see cref="Obs.CombatObsWriter.CardUpgradeFeature"/> (full_env.CARD_UPGRADE_FEATURE).</summary>
+    internal static HandGroupLayout HandGroupLayoutFor(Contract contract)
+    {
+        var c = contract.Actions.Combat;
+        var ids = contract.I("combat.hand.ids");
+        var hf = contract.F("combat.hand.f");
+        int width = c.MaxHand > 0 ? hf.Width / c.MaxHand : 0;
+        return new HandGroupLayout(
+            PlayBase: c.PlayBase, MaxHand: c.MaxHand, MaxEnemies: c.MaxEnemies,
+            HandIdsOffset: ids.Offset, HandFOffset: hf.Offset,
+            CardFeatureWidth: width, UpgradeFeatureIndex: Obs.CombatObsWriter.CardUpgradeFeature);
     }
 
     public void Dispose()

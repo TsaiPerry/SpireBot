@@ -59,6 +59,11 @@ public static class CombatObsWriter
     private const int MaxCombatCards = 96;
     private const int NCardFeatures = 31;
 
+    /// <summary>Column of the hand.f card row holding clip01(CurrentUpgradeLevel / 5) —
+    /// full_env.CARD_UPGRADE_FEATURE. Public so OnnxPolicy's duplicate-merging decoder keys on
+    /// the SAME cell this writer fills (WriteCardFeatures).</summary>
+    public const int CardUpgradeFeature = 16;
+
     // Round 6 fix 4 — see the S(23, ...) magic_number scan in WriteCardFeatures for the
     // full citation. Priority order copied verbatim from sts2_rl/cards/base.py's
     // _MAGIC_ATTRS, restricted to the subset with a confirmed 1:1 DynamicVarSet key.
@@ -515,7 +520,7 @@ public static class CombatObsWriter
         S(14, card.Keywords.Contains(CardKeyword.Unplayable) ? 0f : 1f);
         bool affordable = card.EnergyCost.CostsX || effectiveCost <= pcs.Energy;
         S(15, affordable ? 1f : 0f);
-        S(16, Clip01(card.CurrentUpgradeLevel / 5f));
+        S(CardUpgradeFeature, Clip01(card.CurrentUpgradeLevel / 5f));
 
         var vars = card.DynamicVars;
         if (vars.ContainsKey("CalculatedDamage"))
