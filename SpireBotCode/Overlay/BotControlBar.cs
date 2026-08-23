@@ -30,7 +30,7 @@ public sealed partial class BotControlBar : HBoxContainer
         // whatever is underneath (a card, a map node).
         MouseFilter = MouseFilterEnum.Stop;
 
-        _pauseButton = MakeButton("🤖 Auto: OFF", OnAutopilotPressed);
+        _pauseButton = MakeButton("Auto: OFF", OnAutopilotPressed);
         AddChild(_pauseButton);
 
         AddChild(MakeButton("◀", OnSpeedDown));
@@ -100,7 +100,7 @@ public sealed partial class BotControlBar : HBoxContainer
         if (!Visible) return;
 
         bool paused = BotController.Paused;
-        _pauseButton.Text = paused ? "🤖 Auto: OFF" : "🤖 Auto: ON";
+        _pauseButton.Text = paused ? "Auto: OFF" : "Auto: ON";
         _stepButton.Visible = paused;
         _speedLabel.Text = PacingPlan.IsInstant(SpireBotConfig.DecisionSpeed)
             ? "Inst"
