@@ -56,7 +56,7 @@ public class SpireBotConfig : SimpleModConfig
     /// <summary>
     /// When true, the bot drives every attached run itself from the first room. When false
     /// (the default), it attaches to every eligible run as a paused ADVISOR — the overlay
-    /// shows what it would do, and the 🤖 Autopilot toggle on the overlay hands the run over
+    /// shows what it would do, and the Autopilot toggle on the overlay hands the run over
     /// (or back) at any time. Replaces the old always-start-paused knob (inverted sense) as part of
     /// the 2026-08-20 UX pacing change, which also removed the main menu's "Bot Run" button:
     /// the bot is now always attached to eligible runs, and this only chooses who drives first.
