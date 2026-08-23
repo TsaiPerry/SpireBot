@@ -56,16 +56,15 @@ internal enum ScreenFamily
 /// (ReplayDispatcher.cs:962) — i.e. only once the player has actually left the merchant ROOM,
 /// not merely closed the shop UI.
 ///
-/// <c>CloseShopCommand</c> is deliberately NOT a trigger: <c>NMerchantInventory.Close()</c>
-/// (NMerchantInventory.cs:219-234, invoked by <see cref="CloseShopCommand"/> via reflection on
-/// `Close`, CloseShopCommand.cs:14-16,34) only sets <c>IsOpen = false</c> and fires
-/// <c>InventoryClosed</c> — which <c>NMerchantRoom.OpenInventory</c>'s handler
-/// (NMerchantRoom.cs:191-196) uses to RE-ENABLE the room's own <c>_proceedButton</c> (the
-/// "Leave" button) and <c>MerchantButton</c> (the "browse again" button). Closing the shop UI is
-/// exactly the mid-visit state the brief's "genuine re-entry mid-visit must still work"
-/// constraint describes — the player is still standing in the shop, free to reopen it
-/// (<see cref="OpenShopCommand"/>) or leave (<see cref="ProceedToMapCommand"/>) next. Marking
-/// exit here would wrongly suppress a shop that is still legitimately open for business.
+/// <c>CloseShopCommand</c> WAS deliberately not a trigger (through 2026-08-21): <c>NMerchantInventory.Close()</c>
+/// only sets <c>IsOpen = false</c> and fires <c>InventoryClosed</c>, re-enabling the room's
+/// <c>_proceedButton</c> and <c>MerchantButton</c> — a human standing in the shop may browse again.
+/// Since 2026-08-22 (shop-visibility flow, <c>BotController.TryShopFlow</c>) the bot opens the
+/// inventory before buying, so the policy's "Leave shop" maps to CloseShopCommand — and for the
+/// BOT that close IS the terminal leave (the sim never re-enters a shop after its leave action),
+/// so <see cref="Record"/> now marks the Shop family exited on a Shop-kind CloseShop too; the
+/// flow then auto-advances ProceedToMap instead of reopening. A human closing the UI in advisor
+/// mode never passes through Record, so their re-entry is unaffected.
 ///
 /// <c>NMerchantRoom.HideScreen</c> (NMerchantRoom.cs:160-166) IS the real "leave" action — it's
 /// the handler wired to the room's own <c>_proceedButton.Released</c> (NMerchantRoom.cs:79), and
