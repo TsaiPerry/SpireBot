@@ -218,6 +218,7 @@ public sealed partial class ThinkingOverlay : CanvasLayer
 
     public override void _Process(double delta)
     {
+        PerfProbe.Frame(delta);
         UpdateVisibility();
         // Driven from _Process rather than from BotController.DecisionMade: that event can fire
         // from dispatch-signal context (see this class's header comment), whereas _Process is

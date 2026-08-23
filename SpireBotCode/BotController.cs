@@ -163,7 +163,7 @@ public static class BotController
 
         try
         {
-            ActionExecutor.Execute(held.Cmd, held.Kind);
+            using (PerfProbe.Time("Execute")) ActionExecutor.Execute(held.Cmd, held.Kind);
         }
         catch (Exception ex)
         {
@@ -242,6 +242,9 @@ public static class BotController
 
     /// <summary>Self-test seam (BotControlSelfTest): whether a single-step is armed.</summary>
     internal static bool StepArmed => _stepOnce;
+
+    /// <summary>PerfProbe seam (temporary frame-drop diagnostic).</summary>
+    internal static bool DwellArmedForProbe => _dwellArmed;
 
     private static bool _subscribed;
     private static Contract? _contract;
@@ -622,6 +625,7 @@ public static class BotController
 
     private static void OnInputRequired()
     {
+        PerfProbe.Count("inputRequired");
         // Cleared unconditionally at entry: whether this cycle was woken by the re-check timer or
         // by anything else, no timer is outstanding once we are here, and the gate check below
         // schedules a fresh one if it still holds.
@@ -763,6 +767,7 @@ public static class BotController
 
     private static void OnHeartbeat()
     {
+        PerfProbe.Count("heartbeat");
         if (!_running) return;
 
         // Unconditional, including while paused: Tick() is self-guarding — on a healthy idle
@@ -784,12 +789,13 @@ public static class BotController
 
     private static void RunDecision()
     {
+        using var _perfRunDecision = PerfProbe.Time("RunDecision");
         DecisionContext ctx;
         ActionMap map;
 
         try
         {
-            ctx = DecisionContext.Capture(_session);
+            using (PerfProbe.Time("Capture")) ctx = DecisionContext.Capture(_session);
             RoomOneShots.OnDecision(ctx);   // must precede Build — it masks spent one-shots
             RewardClaimMemory.OnDecision(ctx);   // must precede Build — it masks declined card claims
 
@@ -802,7 +808,7 @@ public static class BotController
             if (_previewing && _pending != null && BuildDecisionKey(ctx) == _pending.Key)
                 return;
 
-            map = ActionMap.Build(_contract!, ctx, _session);
+            using (PerfProbe.Time("ActionMapBuild")) map = ActionMap.Build(_contract!, ctx, _session);
         }
         catch (Exception ex)
         {
@@ -821,7 +827,7 @@ public static class BotController
         ObsResult? obs = null;
         if (_obsBuilder != null)
         {
-            try { obs = _obsBuilder.Build(ctx); }
+            try { using (PerfProbe.Time("ObsBuild")) obs = _obsBuilder.Build(ctx); }
             catch (Exception ex)
             {
                 GD.PrintErr($"[SpireBot] BotController: ObsBuilder.Build threw (non-fatal): {ex}");
@@ -940,6 +946,7 @@ public static class BotController
 
         try
         {
+            using var _perfChoose = PerfProbe.Time("Choose");
             result = forceFallback
                 ? new FirstLegalPolicy().Choose(ctx, map, obs)
                 : (Policy ?? new FirstLegalPolicy()).Choose(ctx, map, obs);
