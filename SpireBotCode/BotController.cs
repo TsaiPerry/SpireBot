@@ -134,6 +134,32 @@ public static class BotController
     /// is the situation the automatic guard exists to substitute for.</summary>
     private static void Commit(PendingAction held)
     {
+        // A held action is only valid for the state it was chosen in. Between decide and
+        // commit the world can move — a pacing dwell or a whole pause sits in between — and
+        // executing a stale choice acts on a screen that no longer exists. Observed 2026-08-22:
+        // the last enemy dies, and for ~1s the ONLY dispatchable command is MapMoveCommand
+        // (travel enables before the rewards screen opens); a decision captured in that window
+        // picks a map node, dwells 1.5s, and by commit time the rewards screen is open — the
+        // stale map move then walked off the rewards unclaimed. Pre-pacing this raced the
+        // other way (executed instantly, before the screen existed). Compare the same
+        // BuildDecisionKey the preview refresh gate uses; on a mismatch discard and re-decide
+        // now rather than waiting a heartbeat. Capture is a read-only snapshot (~0.2ms).
+        string nowKey;
+        try { nowKey = BuildDecisionKey(DecisionContext.Capture(_session)); }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[SpireBot] BotController.Commit: DecisionContext.Capture threw while " +
+                        $"revalidating '{held.Cmd.Describe()}' — discarding the hold; the next cycle re-decides: {ex}");
+            return;
+        }
+        if (nowKey != held.Key)
+        {
+            GD.Print($"[SpireBot] BotController.Commit: state changed while '{held.Cmd.Describe()}' " +
+                     "was held — discarding it and re-deciding against the current screen.");
+            Callable.From(OnInputRequired).CallDeferred();
+            return;
+        }
+
         // The gate's counter only mutates on commits and unpaused dispatches, but the probe
         // that selected this command and this commit can be seconds apart — a pacing dwell,
         // or a whole pause, can sit between them — so a re-check here is not purely defensive.
