@@ -32,8 +32,20 @@ public static class ContractSelfTest
                 throw new ContractException(
                     $"Actions.NActions ({contract.Actions.NActions}) != NActions ({contract.NActions}).");
             }
-            if (contract.NActions != 243)
-                throw new ContractException($"expected NActions == 243, got {contract.NActions}.");
+            if (contract.NActions != 253)
+                throw new ContractException($"expected NActions == 253, got {contract.NActions}.");
+
+            // v22 discard block: 10 slots directly after the belt-potion block,
+            // closing out the action space (run_env.py: DISCARD_BASE =
+            // POTION_BASE + MAX_POTION_SLOTS; N_ACTIONS = DISCARD_BASE + MAX_POTION_SLOTS).
+            var discard = contract.Actions.Discard;
+            var belt = contract.Actions.BeltPotion;
+            if (discard.Base != belt.Base + belt.Slots)
+                throw new ContractException(
+                    $"Actions.Discard.Base ({discard.Base}) != BeltPotion.Base+Slots ({belt.Base + belt.Slots}).");
+            if (discard.Base + discard.Slots != contract.NActions)
+                throw new ContractException(
+                    $"Discard.Base+Slots ({discard.Base + discard.Slots}) != NActions ({contract.NActions}).");
 
             // Known real segment names, probed from a generated contract.json (sts2-rl
             // sts2_rl/live/export_contract). If the contract's obs layout ever renames these,

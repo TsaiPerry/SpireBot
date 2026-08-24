@@ -114,7 +114,10 @@ public sealed class ActionMap
         // driver.py.potion_actions() gating on
         // `not (self.in_combat or self.combat is not None)` (driver.py:187-212).
         if (ctx.Kind != DecisionKind.Combat)
+        {
             BuildBeltPotion(map, actions, ctx);
+            BuildBeltDiscard(map, actions, ctx);
+        }
 
         return map;
     }
@@ -313,18 +316,33 @@ public sealed class ActionMap
     private static void BuildEvent(ActionMap map, ActionLayout actions, DecisionContext ctx)
     {
         // ReplayDispatcher.cs:199-210 emits one ChooseEventOptionCommand(i)
-        // per i in 0..CurrentOptions.Count-1 with NO locked-option filter.
-        // Per this task's Mask rule ("pure game truth from Available; no sim
-        // legality logic") those are passed straight through as-is — if a
-        // locked option turns out to be clickable in the vendor it will just
-        // fail/retry at Execute() time, a vendor-level concern outside Task 10.
+        // per i in 0..CurrentOptions.Count-1 with NO locked-option filter, but
+        // a LOCKED option (EventOption.IsLocked — OnChosen == null,
+        // EventOption.cs:62; e.g. Endless Conveyor's grab once gold < cost)
+        // is not clickable in the game UI and Chosen() is a silent no-op, so
+        // choosing it re-asks the same decision forever (observed: TEM8SHH8KU
+        // act0 f11, log tail = "Event option 0" repeated until kill). Filter
+        // them here, mirroring driver.py:232's `if not opt.locked`; the obs
+        // side keeps writing every option positionally with its locked flag
+        // (RunObsWriter.WriteEvent ↔ run_env.py:2123-2126), so slot alignment
+        // with the sim is unchanged.
         // DecisionLists.EventOptions: the SAME list Obs.RunObsWriter's event.options rows
         // are written from (Task 13).
         var options = DecisionLists.EventOptions(ctx);
 
+        var sync = ReplayState.ActiveEventSynchronizer;
+        var currentOptions = sync != null && sync.Events.Count > 0
+            ? sync.Events[0].CurrentOptions
+            : null;
+
         foreach (var opt in options)
-            if (opt.RecordedIndex < actions.Choice.Slots)
-                map.Set(actions.Choice.Base + opt.RecordedIndex, opt, $"Event option {opt.RecordedIndex}");
+        {
+            if (opt.RecordedIndex >= actions.Choice.Slots) continue;
+            if (currentOptions != null
+                && opt.RecordedIndex < currentOptions.Count
+                && currentOptions[opt.RecordedIndex].IsLocked) continue;
+            map.Set(actions.Choice.Base + opt.RecordedIndex, opt, $"Event option {opt.RecordedIndex}");
+        }
 
         // NOTE: RecordedIndex == -1 (PROCEED) has no Python-side decision
         // analog — sts2-rl's sim auto-proceeds when an event finishes, it
@@ -711,6 +729,15 @@ public sealed class ActionMap
     // here is exactly the untargeted belt action, never a stray combat one.
     private static void BuildBeltPotion(ActionMap map, ActionLayout actions, DecisionContext ctx)
     {
+        // Sim gates every belt action (drink AND discard) on
+        // run.can_remove_potions (driver.py:208 / driver.py:178) — the game
+        // truth NPotionPopup gates its Use/Discard buttons on
+        // (NPotionPopup.cs:139). ReplayDispatcher enumerates
+        // UsePotion/DiscardPotion commands without that check, so it must be
+        // mirrored here or the mask disagrees with the sim during the three
+        // belt-locking events (Stone of All Time / Ranwid / Future of Potions).
+        if (!BeltUnlocked()) return;
+
         var b = actions.BeltPotion;
         foreach (var potion in ctx.Available.OfType<UsePotionCommand>())
         {
@@ -719,5 +746,38 @@ public sealed class ActionMap
             int actionId = b.Base + (int)potion.PotionIndex;
             map.Set(actionId, potion, $"Drink potion slot {potion.PotionIndex}");
         }
+    }
+
+    // ── Belt discard (contract v2, v22) ──────────────────────────────────
+    //
+    // run_env.py._translate's DISCARD_BASE branch (run_env.py:1808-1809):
+    //   answer = POTION_DISCARD_ACTION_BASE + (action - DISCARD_BASE)
+    // and driver.py.discard_actions() (driver.py:164-184): out of combat only,
+    // run.can_remove_potions, one action per OCCUPIED slot — no usage-class
+    // filter (combat-only potions and Foul Potion are all discardable; the
+    // Discard button is gated only on Player.CanRemovePotions). Positional:
+    // slot p discards run.potions[p]. ReplayDispatcher already emits one
+    // DiscardPotionCommand per occupied slot (ReplayDispatcher.cs:158-164).
+    private static void BuildBeltDiscard(ActionMap map, ActionLayout actions, DecisionContext ctx)
+    {
+        if (!BeltUnlocked()) return;
+
+        var d = actions.Discard;
+        foreach (var discard in ctx.Available.OfType<DiscardPotionCommand>())
+        {
+            if (discard.SlotIndex < 0 || discard.SlotIndex >= d.Slots) continue;
+            int actionId = d.Base + discard.SlotIndex;
+            map.Set(actionId, discard, $"Discard potion slot {discard.SlotIndex}");
+        }
+    }
+
+    /// <summary>Player.CanRemovePotions — the single game-truth gate on the belt
+    /// popup's Use and Discard buttons (NPotionPopup.cs:139). False only while one
+    /// of the three belt-locking events holds the lock. Null player (no run yet /
+    /// mid-transition) reads as locked: no belt actions rather than a wrong mask.</summary>
+    private static bool BeltUnlocked()
+    {
+        var player = SpireBot.Replay.Patches.Replay.CardPlayReplayPatch.ResolveLocalPlayer();
+        return player != null && player.CanRemovePotions;
     }
 }

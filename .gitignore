@@ -21,9 +21,12 @@ packages/
 /.dotnet
 .directory
 
-docs/
+# Bot run outputs (decisions.jsonl per run)
 runs/
 
 .superpowers/
 
 unseeded_*/
+
+# Agentic plans/specs (local working notes)
+docs/

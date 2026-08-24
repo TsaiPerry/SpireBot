@@ -49,6 +49,15 @@ public sealed class BeltPotionActionLayout
     public int Slots { get; init; }
 }
 
+/// <summary>The v22 out-of-combat potion-discard block (contract v2, sts2-rl
+/// run_env.DISCARD_BASE): slot p discards run.potions[p] via the belt popup's
+/// Discard button. Positional and untargeted, exactly like BeltPotion.</summary>
+public sealed class DiscardActionLayout
+{
+    public int Base { get; init; }
+    public int Slots { get; init; }
+}
+
 public sealed class ActionLayout
 {
     public int NActions { get; init; }
@@ -56,6 +65,7 @@ public sealed class ActionLayout
     public ChoiceActionLayout Choice { get; init; } = new();
     public SelectActionLayout Select { get; init; } = new();
     public BeltPotionActionLayout BeltPotion { get; init; } = new();
+    public DiscardActionLayout Discard { get; init; } = new();
 }
 
 /// <summary>
@@ -92,7 +102,10 @@ public sealed class Contract
     // this empty and every lookup returns 0/PAD, matching the pre-round-3 behavior.
     private readonly Dictionary<string, Dictionary<string, int>> _vocab = new();
 
-    private const int SupportedContractVersion = 1;
+    // 2: v22 potion-discard action block ("actions.discard", n_actions 243→253).
+    // v1 is NOT accepted: a v1 contract means a pre-discard model whose 243-wide
+    // head this build's ActionMap would misread — deploy model+contract+mod as a set.
+    private const int SupportedContractVersion = 2;
 
     private Contract() { }
 
@@ -295,6 +308,7 @@ public sealed class Contract
         var choice = RequireObject(actionsElem, "actions.choice", path);
         var select = RequireObject(actionsElem, "actions.select", path);
         var beltPotion = RequireObject(actionsElem, "actions.belt_potion", path);
+        var discard = RequireObject(actionsElem, "actions.discard", path);
 
         return new ActionLayout
         {
@@ -322,6 +336,11 @@ public sealed class Contract
             {
                 Base = RequireInt(beltPotion, "base", path),
                 Slots = RequireInt(beltPotion, "slots", path),
+            },
+            Discard = new DiscardActionLayout
+            {
+                Base = RequireInt(discard, "base", path),
+                Slots = RequireInt(discard, "slots", path),
             },
         };
     }

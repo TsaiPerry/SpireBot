@@ -113,6 +113,36 @@ public static class CardGridScreenCapture
         tcs?.TrySetResult(cards);
     }
 
+    /// <summary>True once the screen's _completionSource has a result — i.e. the game's own
+    /// auto-complete path (CheckIfSelectionComplete → CompleteSelection) already fired inside
+    /// a ClickCard, so the screen closed itself and no further confirm may touch it.</summary>
+    internal static bool IsSelectionCompleted(NCardGridSelectionScreen screen)
+    {
+        var tcs = CompletionSourceField?.GetValue(screen)
+            as System.Threading.Tasks.TaskCompletionSource<IEnumerable<CardModel>>;
+        return tcs?.Task.IsCompleted == true;
+    }
+
+    private static readonly MethodInfo? CombatPileCompleteSelectionMethod =
+        typeof(NCombatPileCardSelectScreen).GetMethod(
+            "CompleteSelection", BindingFlags.NonPublic | BindingFlags.Instance);
+
+    /// <summary>Runs NCombatPileCardSelectScreen's own private CompleteSelection()
+    /// (NCombatPileCardSelectScreen.cs:199-204): UnsubscribeFromPile → SetResult →
+    /// NOverlayStack.Remove, in that order. The unsubscribe-first order is load-bearing —
+    /// resolving the completion source while the screen is still subscribed to
+    /// _pile.ContentsChanged lets the resumed card play's pile moves re-enter
+    /// UpdatePileContents on a completing screen, where CompleteSelection's plain
+    /// SetResult throws on the already-completed task mid pile-move (the frozen
+    /// Neow's Fury card-to-pile animation, TEM8SHH8KU act0 f8).</summary>
+    internal static bool CompleteCombatPileSelection(NCombatPileCardSelectScreen screen)
+    {
+        if (CombatPileCompleteSelectionMethod == null)
+            return false;
+        CombatPileCompleteSelectionMethod.Invoke(screen, null);
+        return true;
+    }
+
     internal static Godot.Node? FindCardHolderByIndex(Godot.Node screen, int index)
     {
         int count = 0;

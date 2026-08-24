@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Nodes.Screens.CardSelection;
 using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
 
 namespace SpireBot.Replay.Commands;
@@ -49,6 +50,25 @@ public class SelectGridCardCommand : ReplayCommand
 
             CardGridScreenCapture.ClickCard(screen, cards[idx]);
             selected.Add(cards[idx]);
+        }
+
+        // NCombatPileCardSelectScreen (Neow's Fury / Seeker Strike retrieval) must close
+        // through its OWN CompleteSelection (UnsubscribeFromPile → SetResult → Remove,
+        // NCombatPileCardSelectScreen.cs:199-204). Resolving the completion source directly
+        // leaves the screen subscribed to _pile.ContentsChanged; the resumed card play's
+        // pile moves then re-enter UpdatePileContents on a completing screen and its plain
+        // SetResult throws mid pile-move — observed as the played card's animation into
+        // the discard pile freezing (TEM8SHH8KU act0 f8, Neow's Fury). ClickCard may
+        // already have auto-completed the screen (CheckIfSelectionComplete when the
+        // selection filled the grid), in which case the game closed it and nothing more
+        // may touch it.
+        if (screen is NCombatPileCardSelectScreen combatPile)
+        {
+            if (!CardGridScreenCapture.IsSelectionCompleted(screen)
+                && !CardGridScreenCapture.CompleteCombatPileSelection(combatPile))
+                CardGridScreenCapture.ConfirmSelection(screen, selected);
+            CardGridScreenCapture.ActiveScreen = null;
+            return ExecuteResult.Ok();
         }
 
         CardGridScreenCapture.ConfirmSelection(screen, selected);
