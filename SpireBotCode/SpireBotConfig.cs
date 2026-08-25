@@ -9,17 +9,27 @@ namespace SpireBot.SpireBotCode;
 /// </summary>
 public class SpireBotConfig : SimpleModConfig
 {
-    /// <summary>Path to the exported ONNX policy model.</summary>
+    // The properties below are dev knobs, hidden from the auto-generated settings screen
+    // ([ConfigHideInUI]): they stay persisted and settable via the saved config JSON, but a
+    // Workshop subscriber never needs them - the shipped defaults are the correct values, and
+    // the path overrides in particular read as required fields while any typed value would
+    // silently degrade the bot to FirstLegalPolicy.
+
+    /// <summary>Dev override: path to the ONNX policy model. Empty = auto-resolve model\model.onnx next to the mod DLL (the shipped layout).</summary>
+    [ConfigHideInUI]
     public static string OnnxModelPath { get; set; } = "";
 
-    /// <summary>Path to the observation/action contract (dims, vocab, action-head layout) the model was trained against.</summary>
+    /// <summary>Dev override: path to the observation/action contract the model was trained against. Empty = auto-resolve model\contract.json next to the mod DLL.</summary>
+    [ConfigHideInUI]
     public static string ContractPath { get; set; } = "";
 
     /// <summary>Sampling temperature for the policy's action distribution. 0 = argmax (fully deterministic).</summary>
+    [ConfigHideInUI]
     [ConfigSlider(0, 2, 0.05)]
     public static float Temperature { get; set; } = 0f;
 
     /// <summary>Restrict sampling to the top K highest-probability actions (ignored when Temperature is 0).</summary>
+    [ConfigHideInUI]
     [ConfigSlider(1, 50, 1)]
     public static int TopK { get; set; } = 5;
 
@@ -30,12 +40,15 @@ public class SpireBotConfig : SimpleModConfig
     /// (End Turn at 3 energy, a potion) beat a card whose mass was split across duplicates
     /// (2026-08-22 finding; see OnnxPolicyCore.ArgmaxMerged). Mirrors `eval.py --merge-duplicates`.
     /// </summary>
+    [ConfigHideInUI]
     public static bool MergeDuplicateCards { get; set; } = true;
 
     /// <summary>If true, dump each decision (observation + action probabilities) to DumpDir for offline inspection.</summary>
+    [ConfigHideInUI]
     public static bool DumpDecisions { get; set; } = false;
 
     /// <summary>Directory decisions are dumped to when DumpDecisions is enabled.</summary>
+    [ConfigHideInUI]
     public static string DumpDir { get; set; } = "";
 
     /// <summary>
@@ -78,6 +91,7 @@ public class SpireBotConfig : SimpleModConfig
     /// shipped game (it runs as an export_release build) — so they never executed where they
     /// were needed. Cheap enough to leave on; turn off for a performance-sensitive run.
     /// </summary>
+    [ConfigHideInUI]
     public static bool SelfChecks { get; set; } = true;
 
     /// <summary>Toggles the in-game "thinking" overlay (ThinkingOverlay) that shows the bot's
@@ -95,5 +109,6 @@ public class SpireBotConfig : SimpleModConfig
     /// mode: the fork drives the run, SpireBot only watches and records obs for the Task 16
     /// parity grind. See <see cref="PassiveDump"/>.
     /// </summary>
+    [ConfigHideInUI]
     public static bool PassiveDump { get; set; } = false;
 }
