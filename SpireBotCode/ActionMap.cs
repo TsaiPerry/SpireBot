@@ -430,6 +430,16 @@ public sealed class ActionMap
             {
                 string? title = mpe.Model?.Title.GetFormattedText();
                 if (title == null) return (null, null);
+                // driver.py own_actions SHOP branch (driver.py:241-248): a potion entry is
+                // legal only with an open belt slot — PotionCmd.TryToProcure fails silently on
+                // a full belt (no gold spent, same screen re-presented), which let a policy
+                // retry the same refused entry thousands of times in one episode. Game truth
+                // for "full belt" is Player.AddPotionInternal's `_potionSlots.IndexOf(null) < 0`
+                // (Player.cs:633-646, PotionProcureFailureReason.TooFull), exposed as the public
+                // predicate Player.HasOpenPotionSlots (Player.cs:166). Mirror that here so a
+                // belt-full buy never gets an action id in the first place, matching the sim.
+                var player = SpireBot.Replay.Patches.Replay.CardPlayReplayPatch.ResolveLocalPlayer();
+                if (player == null || !player.HasOpenPotionSlots) return (null, null);
                 var cmd = ctx.Available.OfType<BuyPotionCommand>().FirstOrDefault(c => c.PotionTitle == title);
                 return cmd == null ? (null, null) : (cmd, $"Buy potion '{title}'");
             }

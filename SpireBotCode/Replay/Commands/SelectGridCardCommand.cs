@@ -18,6 +18,14 @@ public class SelectGridCardCommand : ReplayCommand
 
     public override bool IsSelectionCommand => true;
 
+    /// <summary>Two-phase execute: phase 1 clicks the cards (their highlight becomes
+    /// visible) and returns Retry so the dispatcher re-runs this SAME instance after the
+    /// hold; phase 2 confirms. Gives the user a beat to see WHICH card the bot picked —
+    /// click+confirm+close used to land in one frame.</summary>
+    private bool _clicked;
+
+    private readonly List<CardModel> _selected = new();
+
     public SelectGridCardCommand(int[] indices) : base("")
     {
         Indices = indices;
@@ -36,21 +44,43 @@ public class SelectGridCardCommand : ReplayCommand
     {
         var screen = CardGridScreenCapture.ActiveScreen;
         if (screen == null)
-            return ExecuteResult.Retry(300);
-
-        var cards = CardGridScreenCapture.GetSelectableCards(screen);
-        if (cards == null)
-            return ExecuteResult.Retry(300);
-
-        var selected = new List<CardModel>();
-        foreach (int idx in Indices)
+            return _clicked ? ExecuteResult.Ok() : ExecuteResult.Retry(300);
+        if (!Godot.GodotObject.IsInstanceValid(screen))
         {
-            if (idx < 0 || idx >= cards.Count)
+            // Screen freed under us (room ended mid-hold): a clicked selection is moot,
+            // consume; an unclicked one keeps the pre-existing retry-until-stale behavior.
+            CardGridScreenCapture.ActiveScreen = null;
+            return _clicked ? ExecuteResult.Ok() : ExecuteResult.Retry(300);
+        }
+
+        if (!_clicked)
+        {
+            var cards = CardGridScreenCapture.GetSelectableCards(screen);
+            if (cards == null)
                 return ExecuteResult.Retry(300);
 
-            CardGridScreenCapture.ClickCard(screen, cards[idx]);
-            selected.Add(cards[idx]);
+            foreach (int idx in Indices)
+            {
+                if (idx < 0 || idx >= cards.Count)
+                    return ExecuteResult.Retry(300);
+            }
+            foreach (int idx in Indices)
+            {
+                CardGridScreenCapture.ClickCard(screen, cards[idx]);
+                _selected.Add(cards[idx]);
+            }
+            _clicked = true;
+
+            // Hold with the pick highlighted so the user can see it, then confirm on the
+            // retry pass. Skipped when the click auto-completed the screen (it already
+            // closed) or at Instant speed.
+            double hold = SpireBot.SpireBotCode.PacingPlan.SelectionHoldSeconds(
+                SpireBot.SpireBotCode.SpireBotConfig.DecisionSpeed);
+            if (hold > 0 && !CardGridScreenCapture.IsSelectionCompleted(screen))
+                return ExecuteResult.Retry((int)(hold * 1000));
         }
+
+        var selected = _selected;
 
         // NCombatPileCardSelectScreen (Neow's Fury / Seeker Strike retrieval) must close
         // through its OWN CompleteSelection (UnsubscribeFromPile → SetResult → Remove,

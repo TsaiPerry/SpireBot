@@ -224,8 +224,10 @@ public static class BotController
             return;
         }
 
-        double dwell = PacingPlan.DwellSeconds(
-            kind, SurfaceKey(ctx) != _lastCommittedSurfaceKey, SpireBotConfig.DecisionSpeed);
+        bool surfaceChanged = SurfaceKey(ctx) != _lastCommittedSurfaceKey;
+        double dwell = cmd is TakeCardCommand
+            ? PacingPlan.CardPickDwellSeconds(surfaceChanged, SpireBotConfig.DecisionSpeed)
+            : PacingPlan.DwellSeconds(kind, surfaceChanged, SpireBotConfig.DecisionSpeed);
         if (dwell <= 0.0)
         {
             Commit(pending);

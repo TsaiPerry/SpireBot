@@ -106,4 +106,28 @@
         <Copy SourceFiles="$(TargetDir)$(TargetName).pdb" DestinationFolder="$(ModsPath)$(MSBuildProjectName)/" Condition="Exists('$(TargetDir)$(TargetName).pdb')" />
         <Copy SourceFiles="@(SpireBotOtherOutputFiles)" DestinationFolder="$(ModsPath)$(MSBuildProjectName)/" Condition="'@(SpireBotOtherOutputFiles)' != ''" />
     </Target>
+
+    <!-- Stages the Steam Workshop item content (BaseLib's mod_upload convention). Off by default;
+         run `dotnet build -p:UploadBuild=true` (or scripts/stage-workshop.ps1). The staged folder is
+         wiped first so removed files (e.g. old model versions) can't linger in the published item.
+         Ships the same DLL set as the mods folder (minus the .pdb) plus the repo-canonical model
+         artifacts from dist/ - NOT the live mods\SpireBot\model folder, which carries .bak files. -->
+    <Target Name="CopyToUploadFolderOnBuild" AfterTargets="CopyToModsFolderOnBuild" Condition="'$(UploadBuild)' == 'true'">
+        <PropertyGroup>
+            <WorkshopContentDir>$(Sts2Path)/mod_upload/$(MSBuildProjectName)/content/$(MSBuildProjectName)/</WorkshopContentDir>
+        </PropertyGroup>
+        <ItemGroup>
+            <WorkshopOtherDlls Include="$(TargetDir)*.dll" Exclude="$(TargetPath);$(TargetDir)GodotSharp*.dll" />
+            <WorkshopModelFiles Include="$(MSBuildProjectDirectory)/dist/model/*" />
+            <WorkshopLicenseFiles Include="$(MSBuildProjectDirectory)/dist/licenses/*" />
+        </ItemGroup>
+        <RemoveDir Directories="$(WorkshopContentDir)" />
+        <Message Text="Staging Workshop item content to $(WorkshopContentDir)" Importance="high" />
+        <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(WorkshopContentDir)" />
+        <Copy SourceFiles="$(MSBuildProjectName).json" DestinationFolder="$(WorkshopContentDir)" />
+        <Copy SourceFiles="@(WorkshopOtherDlls)" DestinationFolder="$(WorkshopContentDir)" Condition="'@(WorkshopOtherDlls)' != ''" />
+        <Copy SourceFiles="@(WorkshopModelFiles)" DestinationFolder="$(WorkshopContentDir)model/" />
+        <Copy SourceFiles="@(WorkshopLicenseFiles)" DestinationFolder="$(WorkshopContentDir)licenses/" />
+        <Copy SourceFiles="SpireBotCode/Replay/LICENSE" DestinationFiles="$(WorkshopContentDir)licenses/LICENSE-RunReplays.txt" />
+    </Target>
 </Project>

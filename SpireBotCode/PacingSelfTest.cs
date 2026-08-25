@@ -57,6 +57,30 @@ public static class PacingSelfTest
             if (!PacingPlan.IsInstant(PacingPlan.InstantSpeed) || PacingPlan.IsInstant(3.0f))
                 throw new Exception("IsInstant threshold wrong.");
 
+            // Card pick (TakeCard on the reward screen): dwells longer than the generic
+            // RewardScreen tier on both surfaces, scales, zero at Instant.
+            if (PacingPlan.CardPickBaseDwellSeconds(true) < PacingPlan.BaseDwellSeconds(DecisionKind.RewardScreen, true)
+                || PacingPlan.CardPickBaseDwellSeconds(false) < PacingPlan.BaseDwellSeconds(DecisionKind.RewardScreen, false))
+                throw new Exception("card-pick dwell must not be shorter than the RewardScreen tier.");
+            if (Math.Abs(PacingPlan.CardPickBaseDwellSeconds(true) - 2.5) > Tolerance
+                || Math.Abs(PacingPlan.CardPickBaseDwellSeconds(false) - 2.0) > Tolerance)
+                throw new Exception("card-pick dwell headline values drifted.");
+            if (Math.Abs(PacingPlan.CardPickDwellSeconds(true, 2.0f) - 1.25) > Tolerance)
+                throw new Exception("card-pick dwell speed scaling wrong.");
+            if (PacingPlan.CardPickDwellSeconds(true, PacingPlan.InstantSpeed) != 0.0)
+                throw new Exception("InstantSpeed must produce a zero card-pick dwell.");
+
+            // Selection hold (click→confirm highlight pause): scales like a dwell, zero at
+            // Instant, and always well under the executor's 5s stale-command drop.
+            double hold1x = PacingPlan.SelectionHoldSeconds(1.0f);
+            double hold2x = PacingPlan.SelectionHoldSeconds(2.0f);
+            if (Math.Abs(hold1x - 0.8) > Tolerance || Math.Abs(hold2x - 0.4) > Tolerance)
+                throw new Exception($"selection hold scaling wrong: 1x={hold1x}, 2x={hold2x}.");
+            if (PacingPlan.SelectionHoldSeconds(PacingPlan.InstantSpeed) != 0.0)
+                throw new Exception("InstantSpeed must produce a zero selection hold.");
+            if (PacingPlan.SelectionHoldSeconds(SliderMin) > 4.0)
+                throw new Exception("selection hold at the slowest speed must stay under the 5s stale drop.");
+
             // Bot ladder: walk up visits every rung in order and clamps at the top, and every
             // rung is representable on the DecisionSpeed config slider.
             float[] steps = SpeedLadder.BotSteps;
