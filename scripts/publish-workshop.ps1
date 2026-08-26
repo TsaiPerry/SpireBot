@@ -26,10 +26,7 @@ $preview = "$repo\dist\preview.png"
 if (-not (Test-Path $preview)) { throw "missing $preview (workshop preview image)" }
 
 $fileId = (Get-Content "$repo\scripts\publishedfileid.txt" -TotalCount 1).Trim()
-$desc = "SpireBot plays Slay the Spire 2 on its own, using a neural-network policy trained with reinforcement learning (PPO). The trained model ships inside the mod - subscribe, enable mods, and start a run with the bot enabled. No configuration needed." `
-      + "\n\nRequires BaseLib (listed as a required item)." `
-      + "\nWindows only." `
-      + "\nBuilt for the game's main branch (v0.107.1); the beta branch is not supported."
+$desc = "Machine learning model that can beat A0 about 5% of the time. Ironclad only."
 
 $vdfPath = Join-Path $sts2 "mod_upload\SpireBot\workshop_item.vdf"
 @"

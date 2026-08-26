@@ -19,6 +19,26 @@
         <RuntimeIdentifier>win-x64</RuntimeIdentifier>
         <SelfContained>false</SelfContained>
 
+        <!-- MUST stay explicit. Setting a RuntimeIdentifier makes the SDK *infer*
+             PlatformTarget from the RID's architecture (win-x64 -> x64), which stamps the
+             managed assembly's PE header as AMD64/PE32+ instead of AnyCPU. The game's mod
+             loader calls AssemblyLoadContext.LoadFromAssemblyPath, and on an arm64 runtime
+             (Apple Silicon) an AMD64-stamped assembly throws
+                 System.IO.FileLoadException: ... The assembly architecture is not compatible
+                 with the current process architecture
+             before a single line of our code runs. BaseLib and Microsoft.ML.OnnxRuntime are
+             both AnyCPU; we were the only assembly in the mod folder that wasn't. Forcing
+             AnyCPU here keeps the RID doing its only real job (resolving the native
+             runtimes/<rid>/native asset above) without making our IL architecture-specific.
+             Verify after touching this: the PE header of the built SpireBot.dll must read
+             Machine=0x014C / Magic=0x010B, not 0x8664 / 0x020B. -->
+        <PlatformTarget>AnyCPU</PlatformTarget>
+
+        <!-- Single source of the ONNX Runtime version: the PackageReferences below AND the
+             cross-platform native copy (OnnxMacNativeFiles) read it, so they cannot drift apart
+             and silently ship a mismatched dylib next to a newer managed wrapper. -->
+        <OnnxRuntimeVersion>1.20.1</OnnxRuntimeVersion>
+
         <!-- Class-library projects default this to false (only the final app is expected to copy its
              dependencies locally); Godot itself relies on that default, resolving its own managed
              dependencies from the NuGet cache via deps.json at launch. Our mod loader has no such
@@ -75,8 +95,30 @@
              launch path resolves dependencies from the NuGet cache via deps.json instead of copying them
              locally; our mod loader has no such resolution and loads SpireBot.dll standalone, so every
              dependency it needs must physically sit next to it in mods\SpireBot\). -->
-        <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.20.1" />
-        <PackageReference Include="Microsoft.ML.OnnxRuntime.Managed" Version="1.20.1" />
+        <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="$(OnnxRuntimeVersion)" />
+        <PackageReference Include="Microsoft.ML.OnnxRuntime.Managed" Version="$(OnnxRuntimeVersion)" />
+    </ItemGroup>
+
+    <!-- macOS ONNX Runtime binaries, taken straight from the restored NuGet package. NuGet resolves
+         native assets for the single RuntimeIdentifier above (win-x64) only, so the Mac ones have to
+         be copied by hand or a Mac subscriber gets a mod that loads and then cannot build an
+         InferenceSession.
+
+         These do NOT go flat next to the DLL the way the Windows pair does: osx-arm64 and osx-x64
+         both name their library libonnxruntime.dylib, so they would overwrite each other. Keeping the
+         runtimes/<rid>/native/ layout lets both ship; AssemblyResolution picks the one matching the
+         running process and loads it by absolute path. -->
+    <PropertyGroup>
+        <OnnxRuntimePackageDir>$(NuGetPackageRoot)microsoft.ml.onnxruntime/$(OnnxRuntimeVersion)/</OnnxRuntimePackageDir>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <OnnxMacNativeFiles Include="$(OnnxRuntimePackageDir)runtimes/osx-arm64/native/*">
+            <Rid>osx-arm64</Rid>
+        </OnnxMacNativeFiles>
+        <OnnxMacNativeFiles Include="$(OnnxRuntimePackageDir)runtimes/osx-x64/native/*">
+            <Rid>osx-x64</Rid>
+        </OnnxMacNativeFiles>
     </ItemGroup>
 
     <ItemGroup>
@@ -119,6 +161,10 @@
         <Copy SourceFiles="$(TargetDir)$(TargetName).pdb" DestinationFolder="$(ModsPath)$(MSBuildProjectName)/" Condition="Exists('$(TargetDir)$(TargetName).pdb')" />
         <Copy SourceFiles="@(SpireBotOtherOutputFiles)" DestinationFolder="$(ModsPath)$(MSBuildProjectName)/" Condition="'@(SpireBotOtherOutputFiles)' != ''" />
         <Copy SourceFiles="@(SpireBotModelFiles)" DestinationFolder="$(ModsPath)$(MSBuildProjectName)/model/" SkipUnchangedFiles="true" />
+        <Copy SourceFiles="@(OnnxMacNativeFiles)"
+              DestinationFolder="$(ModsPath)$(MSBuildProjectName)/runtimes/%(OnnxMacNativeFiles.Rid)/native/"
+              SkipUnchangedFiles="true"
+              Condition="'@(OnnxMacNativeFiles)' != ''" />
     </Target>
 
     <!-- Stages the Steam Workshop item content (BaseLib's mod_upload convention). Off by default;
@@ -135,12 +181,21 @@
             <WorkshopModelFiles Include="$(MSBuildProjectDirectory)/dist/model/*" />
             <WorkshopLicenseFiles Include="$(MSBuildProjectDirectory)/dist/licenses/*" />
         </ItemGroup>
+        <!-- A Workshop build is the one that reaches other people's machines, so a missing Mac
+             binary is an error here rather than a warning. Shipping without it produced a
+             subscriber-visible failure once already (an x64-stamped SpireBot.dll that no Apple
+             Silicon process could even load); a silently Windows-only item is the same class of
+             mistake, just quieter. Everyday `dotnet build` stays unaffected. -->
+        <Error Condition="'@(OnnxMacNativeFiles)' == ''"
+               Text="No macOS ONNX Runtime binaries found under $(OnnxRuntimePackageDir)runtimes/osx-*/native/. A Workshop build must not ship Windows-only; run `dotnet restore` and retry." />
         <RemoveDir Directories="$(WorkshopContentDir)" />
         <Message Text="Staging Workshop item content to $(WorkshopContentDir)" Importance="high" />
         <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(WorkshopContentDir)" />
         <Copy SourceFiles="$(MSBuildProjectName).json" DestinationFolder="$(WorkshopContentDir)" />
         <Copy SourceFiles="@(WorkshopOtherDlls)" DestinationFolder="$(WorkshopContentDir)" Condition="'@(WorkshopOtherDlls)' != ''" />
         <Copy SourceFiles="@(WorkshopModelFiles)" DestinationFolder="$(WorkshopContentDir)model/" />
+        <Copy SourceFiles="@(OnnxMacNativeFiles)"
+              DestinationFolder="$(WorkshopContentDir)runtimes/%(OnnxMacNativeFiles.Rid)/native/" />
         <Copy SourceFiles="@(WorkshopLicenseFiles)" DestinationFolder="$(WorkshopContentDir)licenses/" />
         <Copy SourceFiles="SpireBotCode/Replay/LICENSE" DestinationFiles="$(WorkshopContentDir)licenses/LICENSE-RunReplays.txt" />
     </Target>
