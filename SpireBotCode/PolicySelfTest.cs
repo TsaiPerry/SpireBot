@@ -41,6 +41,46 @@ public static class PolicySelfTest
     {
         CheckArgmaxMerged();
         CheckPlayGroupKeys();
+        CheckForcedFallbackExclusion();
+    }
+
+    /// <summary>
+    /// The stuck guard's escape hatch must not re-issue the command that just failed. Before this
+    /// rule existed the hatch was plain first-legal, so a wedged lowest-id command was chosen
+    /// forever — the act-1 boss reward-screen livelock (run EYXZUNASYP). The failure was silent:
+    /// the guard logged "forcing a fallback action" every time while changing nothing.
+    /// </summary>
+    private static void CheckForcedFallbackExclusion()
+    {
+        // The livelock's own shape: three legal exits, the wedged one lowest.
+        var mask = new[] { true, true, true };
+        string?[] cmds = { "skip rewards", "proceed to next act", "proceed to map" };
+        string? Key(int i) => cmds[i];
+
+        Expect(BotController.FirstLegalOtherThan(mask, Key, "skip rewards", skip: -1) == 1,
+            "must step past the command that just failed");
+
+        // Identical commands in several slots are all the same failed command.
+        Expect(BotController.FirstLegalOtherThan(
+                   mask, i => i == 2 ? "other" : "skip rewards", "skip rewards", skip: -1) == 2,
+            "every slot holding the failed command must be skipped, not just the first");
+
+        // Combat: end-turn is held back so a wedged decision cannot escape by ending the turn
+        // while real plays remain legal.
+        Expect(BotController.FirstLegalOtherThan(
+                   new[] { true, true, true }, i => i == 0 ? "end turn" : "strike",
+                   "strike", skip: 0) == -1,
+            "end-turn must not be taken while it is the skipped slot");
+
+        // Only the wedged command is legal — report no alternative rather than inventing one.
+        Expect(BotController.FirstLegalOtherThan(
+                   new[] { true }, _ => "skip rewards", "skip rewards", skip: -1) == -1,
+            "a sole wedged command has no alternative");
+
+        // Masked slots are never candidates.
+        Expect(BotController.FirstLegalOtherThan(
+                   new[] { true, false }, i => i == 0 ? "wedged" : "free", "wedged", skip: -1) == -1,
+            "a masked slot must not be offered as the alternative");
     }
 
     private static void CheckArgmaxMerged()

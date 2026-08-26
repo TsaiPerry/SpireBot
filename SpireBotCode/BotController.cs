@@ -226,6 +226,11 @@ public static class BotController
             return;
         }
 
+        // Past the preview branch, this command is going to execute (now, or after the dwell).
+        // Recorded here rather than in Commit so the dwell window cannot leave the guard blind.
+        _lastDispatchedKey = pending.Key;
+        _lastDispatchedCommand = cmd.ToString();
+
         bool surfaceChanged = SurfaceKey(ctx) != _lastCommittedSurfaceKey;
         double dwell = cmd is TakeCardCommand
             ? PacingPlan.CardPickDwellSeconds(surfaceChanged, SpireBotConfig.DecisionSpeed)
@@ -314,6 +319,12 @@ public static class BotController
     private static string? _lastDecisionKey;
     private static int _repeatCount;
 
+    /// <summary>The decision key, and the command's string form, of the last action actually
+    /// dispatched for execution (previews excluded — they never ran). <see cref="ForcedFallbackChoice"/>
+    /// uses the pair to avoid re-issuing a command that already failed to change the state.</summary>
+    private static string? _lastDispatchedKey;
+    private static string? _lastDispatchedCommand;
+
     /// <summary>
     /// Attaches the decision loop to a run that is ALREADY in progress — one the player resumed
     /// with the game's own Continue button, or a brand-new run they started themselves (see
@@ -396,6 +407,8 @@ public static class BotController
         ApplyEffectiveSpeed();
         _lastDecisionKey = null;
         _repeatCount = 0;
+        _lastDispatchedKey = null;
+        _lastDispatchedCommand = null;
         StallDiagnostics.Reset();
         StuckRecovery.Reset();
         RoomOneShots.Reset();
@@ -1095,6 +1108,73 @@ public static class BotController
         return true;
     }
 
+    /// <summary>
+    /// The stuck guard's escape hatch. <see cref="FirstLegalPolicy"/> alone is NOT one: it is
+    /// deterministic on the mask, so whenever the wedged command happens to be the lowest legal
+    /// id, the guard re-issues the exact command that just failed to change anything — the safety
+    /// net has a hole precisely where it is needed. Observed live (run EYXZUNASYP, act-1 boss
+    /// reward screen): the guard fired, chose "Skip rewards" again, and the run never recovered.
+    ///
+    /// So the forced choice excludes the command last dispatched for THIS decision. Combat's
+    /// end-turn keeps <see cref="FirstLegalPolicy"/>'s treatment — considered only when nothing
+    /// else remains — so a wedged combat decision cannot escape by ending the turn while real
+    /// plays are still legal.
+    /// </summary>
+    private static PolicyResult ForcedFallbackChoice(DecisionContext ctx, ActionMap map, ObsResult? obs)
+    {
+        var first = new FirstLegalPolicy().Choose(ctx, map, obs);
+
+        // A record from some other decision says nothing about this one; only exclude a command we
+        // know was dispatched for this exact situation.
+        if (_lastDispatchedCommand == null || _lastDispatchedKey != BuildDecisionKey(ctx))
+            return first;
+
+        if (map.CommandFor(first.ActionId)?.ToString() != _lastDispatchedCommand)
+            return first;
+
+        int endTurn = ctx.Kind == DecisionKind.Combat ? map.Contract.Actions.Combat.EndTurn : -1;
+
+        string? CommandKey(int id) => map.CommandFor(id)?.ToString();
+
+        int alternative = FirstLegalOtherThan(map.Mask, CommandKey, _lastDispatchedCommand, skip: endTurn);
+        if (alternative < 0 && endTurn >= 0)
+            alternative = FirstLegalOtherThan(map.Mask, CommandKey, _lastDispatchedCommand, skip: -1);
+
+        if (alternative < 0)
+        {
+            // The wedged command is the ONLY legal one. Nothing here can break the loop; say so
+            // plainly rather than re-dispatching it and reporting a recovery that cannot happen.
+            GD.PrintErr($"[SpireBot] BotController: forced fallback has no alternative to " +
+                        $"'{map.LabelFor(first.ActionId)}' — it is the only legal action and it is " +
+                        $"not advancing the game (kind={ctx.Kind}).");
+            return first;
+        }
+
+        GD.Print($"[SpireBot] BotController: forced fallback skipping '{map.LabelFor(first.ActionId)}' " +
+                 $"(just dispatched, changed nothing) — taking '{map.LabelFor(alternative)}' instead.");
+        return new PolicyResult
+        {
+            ActionId = alternative,
+            TopK = new[] { (map.LabelFor(alternative), 1.0f) },
+        };
+    }
+
+    /// <summary>Lowest legal action id whose command is not <paramref name="excluded"/>, ignoring
+    /// <paramref name="skip"/> (used to hold combat's end-turn back). -1 when there is none.
+    /// Takes the mask and a key lookup rather than an <see cref="ActionMap"/> so the rule can be
+    /// asserted without a Contract — see <c>PolicySelfTest.CheckForcedFallbackExclusion</c>.</summary>
+    internal static int FirstLegalOtherThan(bool[] mask, Func<int, string?> commandKey, string excluded, int skip)
+    {
+        for (int id = 0; id < mask.Length; id++)
+        {
+            if (!mask[id] || id == skip) continue;
+            if (commandKey(id) == excluded) continue;
+            return id;
+        }
+
+        return -1;
+    }
+
     private static void DispatchWithFallback(DecisionContext ctx, ActionMap map, ObsResult? obs, bool forceFallback)
     {
         PolicyResult result;
@@ -1102,7 +1182,7 @@ public static class BotController
         try
         {
             result = forceFallback
-                ? new FirstLegalPolicy().Choose(ctx, map, obs)
+                ? ForcedFallbackChoice(ctx, map, obs)
                 : (Policy ?? new FirstLegalPolicy()).Choose(ctx, map, obs);
         }
         catch (Exception ex)

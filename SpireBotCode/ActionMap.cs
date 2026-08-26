@@ -703,7 +703,18 @@ public sealed class ActionMap
         bool cardClaimPending = ctx.Available.OfType<ClaimRewardCommand>()
             .Any(RewardClaimMemory.IsPendingCardClaim);
 
-        var skipRewards = cardClaimPending
+        // ...and once this room's rewards screen has ALREADY been left, SkipRewards must not be
+        // offered again at all. It stays enumerable for the rest of the room (same stale-node
+        // reason ScreenExitMemory exists for), but a second dispatch executes successfully and
+        // changes NOTHING — so the next decision sees a byte-identical observation and the policy,
+        // being deterministic at temperature 0, picks it again. That is a livelock, and it is not
+        // hypothetical: run EYXZUNASYP wedged on the act-1 boss screen for every decision from the
+        // moment it first skipped until the run was abandoned, with "Proceed to next act" legal
+        // and one slot away the whole time. A command that cannot change the state is not a
+        // choice, so it does not belong in the action map.
+        bool rewardsAlreadyExited = ScreenExitMemory.HasExited(ScreenFamily.RewardScreen);
+
+        var skipRewards = cardClaimPending || rewardsAlreadyExited
             ? null
             : ctx.Available.OfType<SkipRewardsCommand>().FirstOrDefault();
         if (skipRewards != null && nextSlot < choice.Slots)
