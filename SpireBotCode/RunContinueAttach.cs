@@ -34,8 +34,30 @@ public static class RunContinueAttach
     /// <see cref="RunNewAttach"/>, which applies the same rule to brand-new runs.</summary>
     internal const string SupportedCharacter = "IRONCLAD";
 
-    /// <summary>The ascension the policy was trained at. Shared with <see cref="RunNewAttach"/>.</summary>
+    /// <summary>The ascension the policy was trained at. No longer a gate — see
+    /// <see cref="WarnIfOffTrainingDistribution"/>. Shared with <see cref="RunNewAttach"/>.</summary>
     internal const int SupportedAscension = 0;
+
+    /// <summary>
+    /// Says once, loudly, when a run the bot IS attaching to sits outside what the policy was
+    /// trained on. These were refusals until 2026-08-26; they are warnings now because an
+    /// off-distribution bot playing visibly worse is more useful than a bot that silently never
+    /// appears — and because a seeded Custom run is how a reported bug gets reproduced at all.
+    /// Character remains a hard refusal in both callers: wrong action space, not just worse play.
+    /// </summary>
+    internal static void WarnIfOffTrainingDistribution(string source, GameMode mode, int ascension)
+    {
+        if (mode != GameMode.Standard)
+            GD.Print($"[SpireBot] {source}: run is {mode}, not {GameMode.Standard} — attaching " +
+                     $"anyway, but the policy was trained on {GameMode.Standard} runs, so any " +
+                     $"modifiers this mode applies are outside what it has seen.");
+
+        if (ascension != SupportedAscension)
+            GD.Print($"[SpireBot] {source}: run is ascension {ascension}, not {SupportedAscension} " +
+                     $"— attaching anyway, but the policy was trained at ascension " +
+                     $"{SupportedAscension} and the ascension modifiers change the rules it is " +
+                     $"reasoning about. Expect weaker play.");
+    }
 
     private static bool _armed;
     private static string _pendingSeed = "";
@@ -73,13 +95,6 @@ public static class RunContinueAttach
             return false;
         }
 
-        if (save.GameMode != GameMode.Standard)
-        {
-            GD.Print($"[SpireBot] RunContinueAttach: resumed run is {save.GameMode}, not " +
-                     $"{GameMode.Standard} — not attaching.");
-            return false;
-        }
-
         // Singleplayer saves carry exactly one player; CharacterId is the ModelId the game itself
         // logs for a continued run (NMainMenu.cs:405).
         string? character = save.Players?.Count > 0 ? save.Players[0].CharacterId?.Entry : null;
@@ -91,15 +106,12 @@ public static class RunContinueAttach
             return false;
         }
 
-        // Same reasoning as the character check: the policy was trained at ascension 0, and the
-        // ascension modifiers change the rules the advice is reasoning about.
-        if (save.Ascension != SupportedAscension)
-        {
-            GD.Print($"[SpireBot] RunContinueAttach: resumed run is ascension {save.Ascension}, " +
-                     $"not {SupportedAscension} — not attaching, because the policy was trained " +
-                     $"at ascension {SupportedAscension}.");
-            return false;
-        }
+        // Game mode and ascension are WARNINGS, not refusals (2026-08-26, Perry: "the overlay
+        // should fire on any ironclad run"). Both used to decline outright, which meant a seeded
+        // Custom run — the natural way to reproduce a reported bug — silently got no bot and no
+        // overlay at all. Character stays a hard gate: it is the one mismatch the policy cannot
+        // survive, because the action space and observation layout are literally Ironclad's.
+        WarnIfOffTrainingDistribution("RunContinueAttach", save.GameMode, save.Ascension);
 
         seed = save.SerializableRng?.Seed ?? "unknown-seed";
         return true;
@@ -212,13 +224,6 @@ public static class RunNewAttach
             return false;
         }
 
-        if (state.GameMode != GameMode.Standard)
-        {
-            GD.Print($"[SpireBot] RunNewAttach: new run is {state.GameMode}, not " +
-                     $"{GameMode.Standard} — not attaching.");
-            return false;
-        }
-
         string? character = state.Players?.Count > 0
             ? state.Players[0].Character?.Id.Entry
             : null;
@@ -231,13 +236,9 @@ public static class RunNewAttach
             return false;
         }
 
-        if (state.AscensionLevel != RunContinueAttach.SupportedAscension)
-        {
-            GD.Print($"[SpireBot] RunNewAttach: new run is ascension {state.AscensionLevel}, " +
-                     $"not {RunContinueAttach.SupportedAscension} — not attaching, because the " +
-                     $"policy was trained at ascension {RunContinueAttach.SupportedAscension}.");
-            return false;
-        }
+        // See RunContinueAttach.ShouldAttach: mode and ascension warn rather than refuse.
+        RunContinueAttach.WarnIfOffTrainingDistribution(
+            "RunNewAttach", state.GameMode, state.AscensionLevel);
 
         seed = state.Rng?.StringSeed ?? "unknown-seed";
         return true;
