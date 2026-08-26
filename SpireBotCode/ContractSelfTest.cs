@@ -5,14 +5,33 @@ using Godot;
 namespace SpireBot.SpireBotCode;
 
 /// <summary>
-/// Debug-build-only sanity check that the configured contract loads and its data looks sane.
-/// Runs once at mod init, after PatchAll. Never throws — a bad contract here should be visible
-/// in the log, not crash mod load (the config may simply be unset on a first launch).
+/// Startup sanity check that the artifacts the bot needs are actually there: an ONNX model
+/// resolves, and the contract loads with sane data. Runs once at mod init, after PatchAll.
+/// Never throws — a bad artifact here should be visible in the log, not crash mod load.
 /// </summary>
 public static class ContractSelfTest
 {
     public static void Run()
     {
+        // Model first: the contract check below returns early when no contract resolves, and the
+        // policy artifact needs surfacing either way. A missing model is invisible in play —
+        // SelectPolicy falls back to FirstLegalPolicy, which picks the first legal action and
+        // reports it at 100%, so the bot looks healthy while playing near-randomly. That shipped
+        // to the Workshop once (2026-08-25) because empty config short-circuited before
+        // resolution; this check is the regression guard.
+        string? modelPath = ModPaths.ResolveDataFile(SpireBotConfig.OnnxModelPath, "model.onnx")
+                            ?? ModPaths.ResolveDataFile(SpireBotConfig.OnnxModelPath, "stub.onnx");
+        if (modelPath == null || !File.Exists(modelPath))
+        {
+            GD.PrintErr("[SpireBot] ModelSelfTest FAILED: no ONNX model resolved " +
+                        $"(OnnxModelPath='{SpireBotConfig.OnnxModelPath}', mod dir " +
+                        $"'{ModPaths.ModDir ?? "<unknown>"}') — the bot would run FirstLegalPolicy.");
+        }
+        else
+        {
+            GD.Print($"[SpireBot] ModelSelfTest OK ('{modelPath}').");
+        }
+
         // Same resolution the bot itself uses, so the self-test validates the file a Bot Run
         // would actually load (a configured directory, or the default next to the mod DLL).
         string? path = ModPaths.ResolveDataFile(SpireBotConfig.ContractPath, "contract.json");

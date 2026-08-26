@@ -12,13 +12,19 @@ if (-not $sts2) { $sts2 = "C:\Program Files (x86)\Steam\steamapps\common\Slay th
 $staged = Join-Path $sts2 "mod_upload\SpireBot\content\SpireBot"
 if (-not (Test-Path $staged)) { throw "run scripts\stage-workshop.ps1 first ($staged missing)" }
 
+# The shelf MUST live outside the game folder. ModManager.ReadModsInDirRecursive scans mods\
+# recursively for any *.json manifest and takes the mod id from the manifest, not the folder
+# name - so renaming the dev copy in place leaves it fully loaded, and the dedup rule then
+# disables the mods_STEAMTEST copy in its favour, inverting exactly what the rehearsal tests.
 $dev = Join-Path $sts2 "mods\SpireBot"
-$shelf = Join-Path $sts2 "mods\SpireBot._localdev"
+$shelf = Join-Path (Split-Path $sts2 -Parent) "SpireBot._localdev"
 if (Test-Path $shelf) { throw "$shelf already exists - previous rehearsal not restored?" }
-if (Test-Path $dev) { Rename-Item $dev $shelf }
+if (Test-Path $dev) { Move-Item $dev $shelf }
 
 $test = Join-Path $sts2 "mods_STEAMTEST\SpireBot"
 if (Test-Path $test) { Remove-Item $test -Recurse -Force -Confirm:$false }
 New-Item -ItemType Directory -Force $test | Out-Null
 Copy-Item "$staged\*" $test -Recurse
 Write-Host "Installed to $test; local dev mod shelved at $shelf. Launch the game now."
+Write-Host "NOTE: a plain 'dotnet build' redeploys the dev copy into mods\ and would shadow this"
+Write-Host "      rehearsal - build with -p:DeployToModsFolder=false while testing."

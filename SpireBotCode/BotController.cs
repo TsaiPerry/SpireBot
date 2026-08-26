@@ -43,10 +43,12 @@ public static class BotController
     /// <summary>Fired every time a decision was captured and a policy chose an action for it.</summary>
     public static event Action<DecisionContext, PolicyResult>? DecisionMade;
 
-    /// <summary>The policy driving decisions. Defaults to <see cref="FirstLegalPolicy"/>;
-    /// <see cref="SelectPolicy"/> (Task 14, called from PrepareDriver on every attach) swaps this
-    /// to an <see cref="OnnxPolicy"/> when <see cref="SpireBotConfig.OnnxModelPath"/> is set and
-    /// the model loads + validates against the contract, logging which policy won either way.
+    /// <summary>The policy driving decisions. <see cref="SelectPolicy"/> (Task 14, called from
+    /// PrepareDriver on every attach) sets this to an <see cref="OnnxPolicy"/> once a model
+    /// resolves (configured path, else the one shipped beside the mod DLL) and loads + validates
+    /// against the contract; if that fails the attach aborts instead, so a driving bot is always
+    /// an OnnxPolicy. The inert <see cref="FirstLegalPolicy"/> seen here is a placeholder for the
+    /// never-attached state (and a convenience for tests), not a fallback the bot plays with.
     /// Settable directly too (e.g. tests) — every attach re-derives it from config on every run
     /// start, so a manual override only lasts until the next run starts.</summary>
     public static IPolicy Policy { get; set; } = new FirstLegalPolicy();
@@ -345,14 +347,17 @@ public static class BotController
     }
 
     /// <summary>Loads the contract, picks the policy, and makes sure the overlay exists — the
-    /// setup both entry points need before any per-run state is touched. False means the
-    /// contract failed to load and the caller must abort without having changed anything.</summary>
+    /// setup both entry points need before any per-run state is touched. False means the contract
+    /// or the policy failed to load (both broadcast the reason to the log and the overlay) and the
+    /// caller must abort without having changed anything.</summary>
     private static bool PrepareDriver()
     {
         if (!TryLoadContract())
             return false;
 
-        SelectPolicy();
+        if (!SelectPolicy())
+            return false;
+
         ThinkingOverlay.Ensure();
         return true;
     }
@@ -564,44 +569,66 @@ public static class BotController
     }
 
     /// <summary>
-    /// Task 14 policy selection: if <see cref="SpireBotConfig.OnnxModelPath"/> is set and loads
-    /// + validates against <see cref="_contract"/>, drive the run with <see cref="OnnxPolicy"/>;
-    /// otherwise (empty path, or any load/validation failure) fall back to
-    /// <see cref="FirstLegalPolicy"/>. Always logs which one won, loudly, on both paths — this
-    /// is the ONE place that swallows an <see cref="OnnxPolicyException"/> into a fallback
-    /// rather than propagating it; every other error path (per-decision inference failures)
-    /// falls back inside <see cref="OnnxPolicy.Choose"/>/<see cref="DispatchWithFallback"/>
-    /// instead. Disposes a previously-loaded OnnxPolicy first so a second attach (or a
-    /// hot-reload of the model path) never leaks its InferenceSession.
+    /// Task 14 policy selection: resolve a model (an explicit <see cref="SpireBotConfig.OnnxModelPath"/>,
+    /// or when that is empty the one shipped beside the mod DLL) and, if it loads + validates
+    /// against <see cref="_contract"/>, drive the run with <see cref="OnnxPolicy"/>. Returns false
+    /// when no model is found anywhere or it fails to load/validate: the reason goes to the log AND
+    /// the overlay, and the attach aborts — the bot refuses to drive rather than substituting a
+    /// stub policy whose play is indistinguishable from a working bot at a glance. Mid-run
+    /// inference failures are a different case and still degrade gracefully per decision inside
+    /// <see cref="OnnxPolicy.Choose"/>/<see cref="DispatchWithFallback"/>, since killing a live run
+    /// over one bad decision is worse than playing a legal move. Disposes a previously-loaded
+    /// OnnxPolicy first so a second attach (or a hot-reload of the model path) never leaks its
+    /// InferenceSession.
     /// </summary>
-    private static void SelectPolicy()
+    private static bool SelectPolicy()
     {
         (Policy as IDisposable)?.Dispose();
 
-        if (string.IsNullOrWhiteSpace(SpireBotConfig.OnnxModelPath))
-        {
-            GD.Print("[SpireBot] BotController.SelectPolicy: OnnxModelPath is empty — using FirstLegalPolicy.");
-            Policy = new FirstLegalPolicy();
-            return;
-        }
-
         // A configured directory resolves to model.onnx (then stub.onnx) inside it; a configured
-        // file is used as typed. Empty is handled above and keeps meaning "no model, stub bot".
-        string modelPath = ModPaths.ResolveDataFile(SpireBotConfig.OnnxModelPath, "model.onnx")
-                           ?? ModPaths.ResolveDataFile(SpireBotConfig.OnnxModelPath, "stub.onnx")
-                           ?? SpireBotConfig.OnnxModelPath;
+        // file is used as typed; EMPTY resolves the model shipped beside the mod DLL
+        // (mods\SpireBot\model\model.onnx) — the zero-config case every Workshop subscriber is in.
+        // Empty used to short-circuit to FirstLegalPolicy here, which silently gave every
+        // subscriber a first-legal-action bot on top of a perfectly good bundled model; this now
+        // mirrors TryLoadContract, which has always resolved unconditionally.
+        string? modelPath = ModPaths.ResolveDataFile(SpireBotConfig.OnnxModelPath, "model.onnx")
+                            ?? ModPaths.ResolveDataFile(SpireBotConfig.OnnxModelPath, "stub.onnx");
+
+        if (modelPath == null)
+        {
+            // ResolveDataFile returns null only for an empty setting with no model beside the DLL
+            // (a non-empty setting always comes back as typed, so the load error can quote it).
+            Fail("no model is configured and no model.onnx was found next to the mod " +
+                 $"(looked in '{ModPaths.ModDir ?? "<unknown mod dir>"}' and its model\\ subfolder)");
+            return false;
+        }
 
         try
         {
             Policy = OnnxPolicy.Load(modelPath, _contract!);
             GD.Print($"[SpireBot] BotController.SelectPolicy: driving with OnnxPolicy ('{modelPath}').");
+            return true;
         }
         catch (Exception ex)
         {
-            GD.PrintErr($"[SpireBot] BotController.SelectPolicy: OnnxPolicy failed to load/validate " +
-                        $"from '{modelPath}' — falling back to FirstLegalPolicy: {ex}");
-            ThinkingOverlay.ShowStatus($"ONNX model unusable ('{modelPath}') — running first-legal stub policy.");
+            Fail($"the ONNX model at '{modelPath}' failed to load or validate: {ex.Message}");
+            GD.PrintErr(ex.ToString());
+            return false;
+        }
+
+        // A policy failure aborts the attach outright rather than quietly driving with
+        // FirstLegalPolicy. That fallback shipped a Workshop build whose every decision was the
+        // first legal action reported at 100% confidence, indistinguishable in play from a working
+        // bot — a run driven by a stub policy is worse than no run at all, because it looks fine.
+        static void Fail(string reason)
+        {
+            // The attach is aborting, so this policy never drives anything; it only leaves the
+            // field holding a valid object instead of the session we disposed above.
             Policy = new FirstLegalPolicy();
+
+            string message = $"SpireBot attach aborted — {reason}.";
+            GD.PrintErr($"[SpireBot] BotController.SelectPolicy: {message}");
+            ThinkingOverlay.ShowStatus(message);
         }
     }
 

@@ -93,18 +93,32 @@
                 Condition="'$(Sts2DataDir)' == '' or !Exists('$(Sts2DataDir)')" />
     </Target>
 
-    <Target Name="CopyToModsFolderOnBuild" AfterTargets="PostBuildEvent">
+    <PropertyGroup>
+        <!-- Everyday dev deploy into the game's mods folder. Defaults ON (the long-standing
+             behaviour); build with -p:DeployToModsFolder=false to skip it, which is what you want
+             while verifying a Workshop or mods_STEAMTEST copy - a redeployed dev mod would
+             otherwise win the loader's same-id dedup and shadow the copy under test. -->
+        <DeployToModsFolder Condition="'$(DeployToModsFolder)' == ''">true</DeployToModsFolder>
+    </PropertyGroup>
+
+    <Target Name="CopyToModsFolderOnBuild" AfterTargets="PostBuildEvent" Condition="'$(DeployToModsFolder)' == 'true'">
         <ItemGroup>
             <!-- Everything else dotnet build put in the output dir: the ONNX Runtime managed wrapper,
                  its native onnxruntime.dll/onnxruntime_providers_shared.dll, and any other copy-local
                  dependency — EXCEPT GodotSharp*.dll, which the game already provides in-process. -->
             <SpireBotOtherOutputFiles Include="$(TargetDir)*.dll" Exclude="$(TargetPath);$(TargetDir)GodotSharp*.dll" />
+            <!-- The repo is the single source of the policy artifacts: dev deploys get the same
+                 dist/model/ files the Workshop item ships, so a dev install resolves the model
+                 next to the DLL with no configured path, exactly like a subscriber's does. Before
+                 this, model\ was placed here out-of-band and a fresh deploy had no model at all. -->
+            <SpireBotModelFiles Include="$(MSBuildProjectDirectory)/dist/model/*" />
         </ItemGroup>
-        <Message Text="Copying .dll .pdb .json and native runtime files to mods folder." Importance="high" />
+        <Message Text="Copying .dll .pdb .json, native runtime files and dist/model to mods folder." Importance="high" />
         <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(ModsPath)$(MSBuildProjectName)/" />
         <Copy SourceFiles="$(MSBuildProjectName).json" DestinationFolder="$(ModsPath)$(MSBuildProjectName)/" />
         <Copy SourceFiles="$(TargetDir)$(TargetName).pdb" DestinationFolder="$(ModsPath)$(MSBuildProjectName)/" Condition="Exists('$(TargetDir)$(TargetName).pdb')" />
         <Copy SourceFiles="@(SpireBotOtherOutputFiles)" DestinationFolder="$(ModsPath)$(MSBuildProjectName)/" Condition="'@(SpireBotOtherOutputFiles)' != ''" />
+        <Copy SourceFiles="@(SpireBotModelFiles)" DestinationFolder="$(ModsPath)$(MSBuildProjectName)/model/" SkipUnchangedFiles="true" />
     </Target>
 
     <!-- Stages the Steam Workshop item content (BaseLib's mod_upload convention). Off by default;

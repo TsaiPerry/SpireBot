@@ -3,7 +3,7 @@
   "name": "SpireBot",
   "author": "Perry",
   "description": "Plays Slay the Spire 2 runs on its own via a reinforcement-learning-trained ONNX policy. The trained model ships inside the mod - subscribe and play, no configuration needed.",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "min_game_version": "0.107.1",
   "has_pck": false,
   "has_dll": true,

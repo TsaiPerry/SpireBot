@@ -11,6 +11,6 @@ if (-not $sts2) { $sts2 = "C:\Program Files (x86)\Steam\steamapps\common\Slay th
 $test = Join-Path $sts2 "mods_STEAMTEST\SpireBot"
 if (Test-Path $test) { Remove-Item $test -Recurse -Force -Confirm:$false }
 $dev = Join-Path $sts2 "mods\SpireBot"
-$shelf = Join-Path $sts2 "mods\SpireBot._localdev"
-if ((Test-Path $shelf) -and -not (Test-Path $dev)) { Rename-Item $shelf "SpireBot" }
+$shelf = Join-Path (Split-Path $sts2 -Parent) "SpireBot._localdev"
+if ((Test-Path $shelf) -and -not (Test-Path $dev)) { Move-Item $shelf $dev }
 Write-Host "Restored. STEAMTEST copy removed; dev mod back at $dev."
