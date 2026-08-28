@@ -636,9 +636,17 @@ public static class RunObsWriter
         //     field reflection can reach. This is a genuine, confirmed engine-side gap (PAD
         //     always) — flagged in task-7-report.md rather than reflecting into
         //     compiler-generated closure classes.
-        bool hasOptionRelics = c.TryI("event.options.relics.ids", out var optRelicSlice);
-        bool hasOptionRelicsTraded = c.TryI("event.options.relics_traded.ids", out var optRelicTradedSlice);
-        bool hasOptionPotions = c.TryI("event.options.potions.ids", out var optPotionSlice);
+        // Gated by event id for the SAME reason the card block is: the sim populates these
+        // fields for a known handful of events, and `EventOption.Relic` is set by the generic
+        // `EventModel.RelicOption` path that Neow/Pael-style events use. Emitting a relic there,
+        // where training emitted PAD, is train/serve skew that fails silently rather than loudly.
+        string eventId = evt.Id.ToString();
+        bool hasOptionRelics = c.TryI("event.options.relics.ids", out var optRelicSlice)
+                               && EventsWithDynamicRelicPreview.Contains(eventId);
+        bool hasOptionRelicsTraded = c.TryI("event.options.relics_traded.ids", out var optRelicTradedSlice)
+                                     && EventsWithDynamicRelicPreview.Contains(eventId);
+        bool hasOptionPotions = c.TryI("event.options.potions.ids", out var optPotionSlice)
+                                && EventsWithDynamicPotionPreview.Contains(eventId);
 
         IReadOnlyList<MegaCrit.Sts2.Core.Models.RelicModel>? relicTraderNew = null;
         IReadOnlyList<MegaCrit.Sts2.Core.Models.RelicModel>? relicTraderOwned = null;
@@ -682,7 +690,20 @@ public static class RunObsWriter
             {
                 var relic = options[i].Relic
                     ?? (relicTraderNew != null && i < relicTraderNew.Count ? relicTraderNew[i] : null)
-                    ?? (wongoFeatured != null && i == 1 ? wongoFeatured : null);
+                    ?? (wongoFeatured != null && i == 1 ? wongoFeatured : null)
+                    // Doll Room. NOT the unreachable gap an earlier pass concluded: the shuffled
+                    // choice is captured in a closure, but each option still carries
+                    // HoverTipFactory.FromRelic(choice.relic) == relic.HoverTips, and a relic's
+                    // own tip records its identity (RelicModel.cs:371
+                    // `result.SetCanonicalModel(CanonicalInstance)`), so IHoverTip.CanonicalModel
+                    // recovers it without touching compiler-generated closure classes. Leaving it
+                    // PAD skewed against the sim, which DOES populate doll_room
+                    // (sts2_rl/events/doll_room.py `relic_id=rid`).
+                    //
+                    // Deliberately last, and skipped for Relic Trader: that event's options carry
+                    // BOTH relics' tips, so tip order cannot say which is given and which
+                    // received — the indexed reflection above is the only correct source there.
+                    ?? (relicTraderNew == null ? OptionModelFromTips<MegaCrit.Sts2.Core.Models.RelicModel>(options[i]) : null);
                 if (relic != null)
                     PutI(iarr, optRelicSlice, i, Vocab(c, session, "relics", relic.Id.ToString()));
             }
@@ -731,6 +752,33 @@ public static class RunObsWriter
     {
         "EVENT.SLIPPERY_BRIDGE",
     };
+
+    /// <summary>Events whose options preview a RELIC that varies run to run, mirroring the sim's
+    /// `relic_id` / `relic_traded_id` writers. Keep identical to the sim's set.</summary>
+    private static readonly HashSet<string> EventsWithDynamicRelicPreview = new()
+    {
+        "EVENT.DOLL_ROOM",
+        "EVENT.RELIC_TRADER",
+        "EVENT.WELCOME_TO_WONGOS",
+    };
+
+    /// <summary>As above, for the potion an option consumes (sim: `potion_id`).</summary>
+    private static readonly HashSet<string> EventsWithDynamicPotionPreview = new()
+    {
+        "EVENT.STONE_OF_ALL_TIME",
+    };
+
+    /// <summary>
+    /// The model of type <typeparamref name="T"/> an option previews through its own hover tips,
+    /// or null. Every model-backed tip records its identity via
+    /// <c>HoverTip.SetCanonicalModel</c> (RelicModel.cs:371, PotionModel.cs:171), so this works
+    /// for relics and potions even though the engine has no typed RelicHoverTip/PotionHoverTip.
+    /// First match wins — callers must not use it where an option previews two models of the
+    /// same kind (Relic Trader).
+    /// </summary>
+    private static T? OptionModelFromTips<T>(MegaCrit.Sts2.Core.Events.EventOption option)
+        where T : MegaCrit.Sts2.Core.Models.AbstractModel
+        => option.HoverTips?.Select(t => t.CanonicalModel).OfType<T>().FirstOrDefault();
 
     /// <summary>
     /// The card an event option previews, or null. Reads the option's own hover tips rather than
