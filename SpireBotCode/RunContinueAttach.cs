@@ -218,11 +218,13 @@ public static class RunNewAttach
         if (BotController.IsRunning)
             return false;
 
+        // Daily runs attach too (2026-08-26, Perry's call). The gate existed because an
+        // autopiloted daily posts a bot's score to a shared leaderboard; the reason it is
+        // acceptable to lift is that the policy wins roughly 5% of ascension-0 runs, so it cannot
+        // produce a score worth defending against. Revisit if the bot ever gets strong enough for
+        // a daily placing to mean something.
         if (dailyTime != null)
-        {
-            GD.Print("[SpireBot] RunNewAttach: new run is a daily run — not attaching.");
-            return false;
-        }
+            GD.Print("[SpireBot] RunNewAttach: new run is a daily run — attaching anyway.");
 
         string? character = state.Players?.Count > 0
             ? state.Players[0].Character?.Id.Entry

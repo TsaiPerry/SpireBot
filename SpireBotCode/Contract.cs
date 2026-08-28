@@ -371,6 +371,16 @@ public sealed class Contract
     }
 
     /// <summary>
+    /// Look up an int-half segment that a contract may legitimately not have, returning false
+    /// instead of throwing. For blocks added in a LATER obs schema than the loaded contract: the
+    /// writer fills them when present and skips them otherwise, so a newer mod build keeps driving
+    /// an older bundled model instead of failing every observation on a missing key. Use
+    /// <see cref="I"/> for anything the contract must have — a silent skip there would feed the
+    /// policy a zeroed block and look like a normal decision.
+    /// </summary>
+    public bool TryI(string name, out LayoutSlice slice) => _iLayout.TryGetValue(name, out slice);
+
+    /// <summary>
     /// Maps a fully-qualified game-save id (e.g. "CARD.STRIKE") of the given kind (e.g. "cards")
     /// to its stable vocab id. Returns 0 (PAD) when the kind or id is unmapped — callers treat 0
     /// as "unknown content", never as an error, since save files may reference content this

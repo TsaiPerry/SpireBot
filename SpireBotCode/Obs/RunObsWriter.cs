@@ -233,6 +233,20 @@ public static class RunObsWriter
             Put(f, actSlice, state.CurrentActIndex, 1.0f);
 
         Put(f, c.F("run.floor"), 0, Clip01(state.TotalFloor / 50f));
+
+        // run.ascension (run obs schema 13) — current ascension / 10, lets one policy
+        // condition on difficulty (v24, needed for mixed-ascension training). Sim:
+        // run_env.run_obs_segments_f's `("run.ascension", 1)` segment (run_env.py:472-475)
+        // + the writer `buf.f[F("run.ascension")] = self._ascension / 10.0` (run_env.py
+        // :2464-2465). Game accessor: `IRunState.AscensionLevel` (IRunState.cs:124-126,
+        // backed by `RunState.AscensionLevel`, RunState.cs:210,351) — the same run-scoped
+        // state interface every other run.* scalar above already reads off `state`.
+        //
+        // No `TryF` exists on Contract (only `TryI` — see Contract.TryI's own doc comment);
+        // `F` throws on an unknown segment, so this gates on the schema number directly
+        // instead, exactly as the brief specifies, to keep a schema-12 bundled model driving.
+        if (c.RunObsSchema >= 13)
+            Put(f, c.F("run.ascension"), 0, Clip01(state.AscensionLevel / 10f));
     }
 
     // ── potion belt ──────────────────────────────────────────────────────────────────────
@@ -572,13 +586,162 @@ public static class RunObsWriter
 
         var optSlice = c.F("event.options");
         var options = evt.CurrentOptions;
+
+        // event.options.cards (run obs schema 13) — the card each option previews, positionally
+        // aligned with event.options. The game models this as a per-option hover tip
+        // (HoverTipFactory.FromCard -> CardHoverTip.Card, EventOption.HoverTips), which is exactly
+        // what a human reads: Slippery Bridge names the card it would remove.
+        //
+        // TryI, not I, because a bundled model built at schema 12 has no such block and must keep
+        // driving — see Contract.TryI.
+        bool hasOptionCards = c.TryI("event.options.cards.ids", out var optCardSlice)
+                              && EventsWithDynamicCardPreview.Contains(evt.Id.ToString());
+
+        // event.options.relics/relics_traded/potions (run obs schema 13). Sim: the segment
+        // comments at run_env.py:502-510 + the writer at run_env.py:2304-2310 (`opts[i]
+        // .relic_id` / `.relic_traded_id` / `.potion_id`). TryI, not I — schema-12 contract/
+        // bundled model has none of these blocks and must keep driving (Contract.TryI).
+        //
+        // Game-truth: EventOption exposes a single public `Relic` property (EventOption.cs
+        // :30), populated only by `WithRelic`/`EventOption.FromRelic` (EventOption.cs:138-158,
+        // 126-131), which is how `EventModel.RelicOption` (EventModel.cs:655-670) builds
+        // relic-granting options for the generic/Neow/Pael-style events. It covers `.Relic`
+        // for those, but NONE of the three events this task names actually go through that
+        // path: Doll Room (DollRoom.cs:141-151), Relic Trader (RelicTrader.cs:81-96) and
+        // Welcome to Wongo's (WelcomeToWongos.cs:85-107) all build their relic-preview
+        // HoverTips directly off `relic.HoverTips`/`HoverTipFactory.FromRelic(relic)` without
+        // ever calling `WithRelic` — and the engine has no typed `RelicHoverTip`/
+        // `PotionHoverTip` wrapper (unlike cards' `CardHoverTip`, HoverTips/CardHoverTip.cs)
+        // to recover the relic/potion identity back out of a raw hover-tip list either. So
+        // `.Relic` alone under-covers exactly the events this block exists for, and per the
+        // task brief ("mirror the sim's semantics from the event's own model state") the
+        // fallback below reflects into each event's own private state instead of inventing a
+        // value the game doesn't otherwise expose:
+        //   - Relic Trader: Top/Middle/Bottom map 1:1 onto index 0/1/2 of the private
+        //     `NewRelics` (granted) / `OwnedRelics` (given up) lazy properties (RelicTrader.cs
+        //     :30-32 fields, :44-74 properties, :131-151 Top/Middle/Bottom -> Trade(index)),
+        //     exactly mirroring sim's events/relic_trader.py:55-59 (`relic_id=self._new[i].id,
+        //     relic_traded_id=self._owned[i].id`).
+        //   - Welcome to Wongo's: the FEATURED_ITEM/FEATURED_ITEM_LOCKED option is always
+        //     index 1 of the fixed 4-option list (WelcomeToWongos.cs:82-108) and is the only
+        //     option that previews a concrete relic to the player (Bargain Bin/Mystery Box are
+        //     deliberately blind, sts2_rl/events/welcome_to_wongos.py:54-58) — reflects the
+        //     private `FeaturedItem` property (WelcomeToWongos.cs:40-53).
+        //   - Stone of All Time: the LIFT option is always index 0 of the fixed 2-option list
+        //     (StoneOfAllTime.cs:75-91) and previews the potion it consumes — reflects the
+        //     private `DrinkAndLiftPotion` property (StoneOfAllTime.cs:29-42).
+        //   - Doll Room has NO reachable per-option relic identity at all: the shuffled choice
+        //     for its TAKE_SOME_TIME/EXAMINE sub-pages lives only in a *local* variable
+        //     captured by a per-option closure (DollRoom.cs:117-138), not in any instance
+        //     field reflection can reach. This is a genuine, confirmed engine-side gap (PAD
+        //     always) — flagged in task-7-report.md rather than reflecting into
+        //     compiler-generated closure classes.
+        bool hasOptionRelics = c.TryI("event.options.relics.ids", out var optRelicSlice);
+        bool hasOptionRelicsTraded = c.TryI("event.options.relics_traded.ids", out var optRelicTradedSlice);
+        bool hasOptionPotions = c.TryI("event.options.potions.ids", out var optPotionSlice);
+
+        IReadOnlyList<MegaCrit.Sts2.Core.Models.RelicModel>? relicTraderNew = null;
+        IReadOnlyList<MegaCrit.Sts2.Core.Models.RelicModel>? relicTraderOwned = null;
+        if ((hasOptionRelics || hasOptionRelicsTraded) &&
+            evt is MegaCrit.Sts2.Core.Models.Events.RelicTrader relicTrader)
+        {
+            relicTraderNew = RelicTraderNewRelicsProp?.GetValue(relicTrader)
+                as IReadOnlyList<MegaCrit.Sts2.Core.Models.RelicModel>;
+            relicTraderOwned = RelicTraderOwnedRelicsProp?.GetValue(relicTrader)
+                as IReadOnlyList<MegaCrit.Sts2.Core.Models.RelicModel>;
+        }
+
+        MegaCrit.Sts2.Core.Models.RelicModel? wongoFeatured = null;
+        if (hasOptionRelics && evt is MegaCrit.Sts2.Core.Models.Events.WelcomeToWongos wongo)
+        {
+            wongoFeatured = WongoFeaturedItemProp?.GetValue(wongo)
+                as MegaCrit.Sts2.Core.Models.RelicModel;
+        }
+
+        MegaCrit.Sts2.Core.Models.PotionModel? stoneLiftPotion = null;
+        if (hasOptionPotions && evt is MegaCrit.Sts2.Core.Models.Events.StoneOfAllTime stone)
+        {
+            stoneLiftPotion = StoneDrinkAndLiftPotionProp?.GetValue(stone)
+                as MegaCrit.Sts2.Core.Models.PotionModel;
+        }
+
         for (int i = 0; i < options.Count && i < ChoiceSlots; i++)
         {
             Put(f, optSlice, 2 * i, 1f);
             if (options[i].IsLocked)
                 Put(f, optSlice, 2 * i + 1, 1f);
+
+            if (hasOptionCards)
+            {
+                var card = OptionCard(options[i]);
+                if (card != null)
+                    PutI(iarr, optCardSlice, i, Vocab(c, session, "cards", card.Id.ToString()));
+            }
+
+            if (hasOptionRelics)
+            {
+                var relic = options[i].Relic
+                    ?? (relicTraderNew != null && i < relicTraderNew.Count ? relicTraderNew[i] : null)
+                    ?? (wongoFeatured != null && i == 1 ? wongoFeatured : null);
+                if (relic != null)
+                    PutI(iarr, optRelicSlice, i, Vocab(c, session, "relics", relic.Id.ToString()));
+            }
+
+            if (hasOptionRelicsTraded && relicTraderOwned != null && i < relicTraderOwned.Count)
+                PutI(iarr, optRelicTradedSlice, i, Vocab(c, session, "relics", relicTraderOwned[i].Id.ToString()));
+
+            if (hasOptionPotions && stoneLiftPotion != null && i == 0)
+                PutI(iarr, optPotionSlice, i, Vocab(c, session, "potions", stoneLiftPotion.Id.ToString()));
         }
     }
+
+    // ── reflection into per-event private state the engine has no public accessor for; see
+    // the doc comment above WriteEvent's relics/relics_traded/potions block for why each of
+    // these is needed. Follows the same NonPublic PropertyInfo/FieldInfo convention as
+    // RunObsWriter.RoomsField below. ──
+    private static readonly PropertyInfo? RelicTraderNewRelicsProp =
+        typeof(MegaCrit.Sts2.Core.Models.Events.RelicTrader).GetProperty(
+            "NewRelics", BindingFlags.NonPublic | BindingFlags.Instance);
+
+    private static readonly PropertyInfo? RelicTraderOwnedRelicsProp =
+        typeof(MegaCrit.Sts2.Core.Models.Events.RelicTrader).GetProperty(
+            "OwnedRelics", BindingFlags.NonPublic | BindingFlags.Instance);
+
+    private static readonly PropertyInfo? WongoFeaturedItemProp =
+        typeof(MegaCrit.Sts2.Core.Models.Events.WelcomeToWongos).GetProperty(
+            "FeaturedItem", BindingFlags.NonPublic | BindingFlags.Instance);
+
+    private static readonly PropertyInfo? StoneDrinkAndLiftPotionProp =
+        typeof(MegaCrit.Sts2.Core.Models.Events.StoneOfAllTime).GetProperty(
+            "DrinkAndLiftPotion", BindingFlags.NonPublic | BindingFlags.Instance);
+
+    /// <summary>
+    /// Events whose previewed card VARIES from run to run, and which therefore set
+    /// <c>EventOption.card_id</c> on the sim side. This list must stay identical to the sim's —
+    /// see <c>sts2_rl/events/base.py</c>'s EventOption docstring.
+    ///
+    /// It exists because reading every <c>CardHoverTip</c> unconditionally would be WRONG, not
+    /// merely redundant: most events preview a card through a compile-time generic
+    /// (<c>FromCard&lt;T&gt;()</c>), so the card is constant for that event and the sim leaves it
+    /// PAD. Emitting a live id where training emitted PAD feeds the policy an embedding it never
+    /// saw — a silent train/serve skew rather than an error. Adding an event here without adding
+    /// it in the sim (and retraining) reintroduces exactly that skew.
+    /// </summary>
+    private static readonly HashSet<string> EventsWithDynamicCardPreview = new()
+    {
+        "EVENT.SLIPPERY_BRIDGE",
+    };
+
+    /// <summary>
+    /// The card an event option previews, or null. Reads the option's own hover tips rather than
+    /// any per-event special case, so every event that previews a card through
+    /// <c>HoverTipFactory.FromCard</c> is covered by construction. First tip wins: an option
+    /// showing several cards has no single "the card this is about", and the sim side models one.
+    /// </summary>
+    private static MegaCrit.Sts2.Core.Models.CardModel? OptionCard(
+        MegaCrit.Sts2.Core.Events.EventOption option)
+        => option.HoverTips?.OfType<MegaCrit.Sts2.Core.HoverTips.CardHoverTip>()
+                            .FirstOrDefault()?.Card;
 
     // ── shop ─────────────────────────────────────────────────────────────────────────────
     private static void WriteShop(Contract c, float[] f, long[] iarr, SessionState session, DecisionContext ctx)
